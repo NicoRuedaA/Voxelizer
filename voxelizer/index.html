@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voxelizer — sprite → voxel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg0:#15161a;        /* desktop behind window */
+  --bg1:#1c1d22;        /* window body */
+  --bg2:#212329;        /* panels */
+  --bg3:#282b33;        /* raised inputs */
+  --bg4:#31343d;        /* hover */
+  --line:#34373f;
+  --line2:#3f434d;
+  --txt:#e7e8ec;
+  --dim:#8b909c;
+  --dim2:#646977;
+  --accent:#ff8a3d;     /* primary action (orange) */
+  --accent-d:#e0712a;
+  --sel:#3fbacb;        /* selection / active (teal, matched chroma) */
+  --sel-dim:rgba(63,186,203,0.16);
+  --grid:#23252c;
+  --ui:'JetBrains Mono',ui-monospace,monospace;
+  --pix:'Silkscreen',var(--ui);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 70% -10%, #20222a 0%, var(--bg0) 60%);
+  font-family:var(--ui);
+  color:var(--txt);
+  font-size:12px;
+  -webkit-font-smoothing:antialiased;
+  display:flex;align-items:center;justify-content:center;
+  padding:18px;
+}
+::selection{background:var(--sel);color:#06212a}
+
+/* ---------- window chrome ---------- */
+.window{
+  width:100%;max-width:1180px;height:100%;max-height:760px;
+  background:var(--bg1);
+  border:1px solid var(--line2);
+  border-radius:9px;
+  box-shadow:0 24px 70px -12px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.02) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.titlebar{
+  height:38px;flex:0 0 38px;display:flex;align-items:center;gap:14px;
+  padding:0 12px;background:linear-gradient(#23252c,#1d1f24);
+  border-bottom:1px solid var(--line);
+}
+.lights{display:flex;gap:7px}
+.lights i{width:11px;height:11px;border-radius:50%;display:block}
+.lights .r{background:#ed6a5e} .lights .y{background:#f4bf4f} .lights .g{background:#62c554}
+.appname{font-family:var(--pix);font-size:11px;letter-spacing:.5px;color:var(--txt)}
+.appname b{color:var(--accent)}
+.menu{display:flex;gap:2px;margin-left:6px}
+.menu span{padding:3px 8px;color:var(--dim);border-radius:4px;cursor:default}
+.menu span:hover{background:var(--bg3);color:var(--txt)}
+.tb-spacer{flex:1}
+.ver{color:var(--dim2);font-size:10px}
+
+/* ---------- body ---------- */
+.body{flex:1;display:flex;min-height:0}
+.panel{background:var(--bg2);display:flex;flex-direction:column;min-height:0}
+.panel.left{width:236px;flex:0 0 236px;border-right:1px solid var(--line)}
+.panel.right{width:300px;flex:0 0 300px;border-left:1px solid var(--line)}
+.viewport{flex:1;position:relative;min-width:0;background:
+  radial-gradient(900px 600px at 50% 38%, #1f2128 0%, #141519 78%);}
+
+.sec-h{
+  font-family:var(--pix);font-size:9px;letter-spacing:.6px;color:var(--dim);
+  padding:11px 13px 7px;display:flex;align-items:center;justify-content:space-between;
+  text-transform:uppercase;
+}
+.sec-h .count{color:var(--dim2)}
+
+/* ---------- batch (left) ---------- */
+.drop{
+  margin:4px 12px 10px;border:1.5px dashed var(--line2);border-radius:7px;
+  padding:16px 10px;text-align:center;color:var(--dim);cursor:pointer;
+  transition:.13s;background:var(--bg1);
+}
+.drop:hover,.drop.over{border-color:var(--accent);color:var(--txt);background:#26221d}
+.drop .ic{font-size:18px;display:block;margin-bottom:5px;opacity:.8}
+.drop b{color:var(--txt);font-weight:500}
+.drop small{display:block;margin-top:4px;color:var(--dim2);font-size:10px}
+
+.list{flex:1;overflow-y:auto;padding:2px 8px 10px}
+.item{
+  display:flex;align-items:center;gap:9px;padding:6px 7px;border-radius:6px;
+  cursor:pointer;border:1px solid transparent;margin-bottom:2px;
+}
+.item:hover{background:var(--bg3)}
+.item.active{background:var(--sel-dim);border-color:var(--sel)}
+.item canvas{
+  width:34px;height:34px;flex:0 0 34px;border-radius:5px;background:
+    repeating-conic-gradient(#202228 0% 25%, #1a1c21 0% 50%) 50%/10px 10px;
+  image-rendering:pixelated;border:1px solid var(--line);
+}
+.item .meta{flex:1;min-width:0}
+.item .nm{color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .sub{color:var(--dim2);font-size:10px;margin-top:1px}
+.item .st{font-size:9px;font-family:var(--pix);padding:2px 5px;border-radius:4px}
+.st.done{color:var(--sel);background:var(--sel-dim)}
+.st.queued{color:var(--dim);background:var(--bg4)}
+
+/* ---------- viewport ---------- */
+.vp-toolbar{
+  position:absolute;top:10px;right:12px;display:flex;gap:5px;z-index:5;
+}
+.tbtn{
+  width:30px;height:30px;border-radius:6px;border:1px solid var(--line2);
+  background:rgba(28,30,36,.72);backdrop-filter:blur(6px);color:var(--dim);
+  cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;
+}
+.tbtn:hover{color:var(--txt);border-color:var(--line2);background:var(--bg3)}
+.tbtn.on{color:var(--sel);border-color:var(--sel);background:var(--sel-dim)}
+
+.vp-info{
+  position:absolute;top:12px;left:14px;z-index:5;color:var(--dim);font-size:10px;
+  line-height:1.7;pointer-events:none;
+}
+.vp-info b{color:var(--txt)}
+.vp-info .tag{font-family:var(--pix);font-size:8px;color:var(--dim2);letter-spacing:.5px}
+
+#three{position:absolute;inset:0}
+.vp-foot{
+  position:absolute;left:0;right:0;bottom:0;z-index:5;
+  display:flex;gap:0;align-items:stretch;
+  background:linear-gradient(transparent,rgba(20,21,25,.9)45%);
+  padding:22px 14px 12px;pointer-events:none;
+}
+.stat{padding-right:22px;margin-right:22px;border-right:1px solid var(--line)}
+.stat:last-child{border:0}
+.stat .k{font-family:var(--pix);font-size:8px;color:var(--dim2);letter-spacing:.5px;display:block;margin-bottom:3px}
+.stat .v{font-size:15px;color:var(--txt);font-weight:500}
+.stat .v small{font-size:10px;color:var(--dim);font-weight:400}
+.stat .v.hi{color:var(--accent)}
+.stat .v.good{color:var(--sel)}
+
+/* ---------- inspector (right) ---------- */
+.insp{flex:1;overflow-y:auto;padding-bottom:14px}
+.grp{border-bottom:1px solid var(--line);padding:0 0 12px}
+.ctl{padding:7px 14px 0}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
+.lbl{color:var(--dim);display:flex;align-items:center;gap:6px}
+.lbl .flag{color:var(--dim2);font-size:10px}
+.val{color:var(--txt);font-variant-numeric:tabular-nums;min-width:38px;text-align:right}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:3px;
+  background:var(--bg4);outline:none;cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--bg1);cursor:pointer;
+  box-shadow:0 0 0 1px var(--accent-d);
+}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--bg1);border-radius:50%;background:var(--accent);cursor:pointer}
+
+.toggle{
+  width:38px;height:21px;border-radius:11px;background:var(--bg4);position:relative;
+  cursor:pointer;flex:0 0 38px;transition:.15s;border:1px solid var(--line2);
+}
+.toggle::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--dim);transition:.15s}
+.toggle.on{background:var(--sel-dim);border-color:var(--sel)}
+.toggle.on::after{left:19px;background:var(--sel)}
+
+.seg{display:flex;background:var(--bg3);border:1px solid var(--line2);border-radius:6px;overflow:hidden}
+.seg button{flex:1;padding:6px;background:none;border:0;color:var(--dim);font-family:var(--ui);font-size:11px;cursor:pointer;border-right:1px solid var(--line2)}
+.seg button:last-child{border:0}
+.seg button.on{background:var(--sel-dim);color:var(--sel)}
+
+.num{width:48px;background:var(--bg3);border:1px solid var(--line2);color:var(--txt);border-radius:5px;padding:4px 6px;font-family:var(--ui);font-size:11px;text-align:center}
+.num:focus{outline:none;border-color:var(--sel)}
+
+.swatches{display:flex;flex-wrap:wrap;gap:4px;padding:2px 14px 0}
+.swatches i{width:15px;height:15px;border-radius:3px;border:1px solid rgba(255,255,255,.12);display:block}
+
+.chk{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0}
+.box{width:16px;height:16px;border-radius:4px;border:1px solid var(--line2);background:var(--bg3);display:flex;align-items:center;justify-content:center;color:transparent;font-size:11px}
+.chk.on .box{background:var(--accent);border-color:var(--accent);color:#1a1206}
+.fmt-meta{color:var(--dim2);font-size:10px;margin-left:auto}
+
+.export{padding:12px 14px 4px}
+.btn{
+  width:100%;padding:10px;border:0;border-radius:7px;background:var(--accent);
+  color:#1c1206;font-family:var(--pix);font-size:10px;letter-spacing:.5px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+}
+.btn:hover{background:#ffa05c}
+.btn:active{transform:translateY(1px)}
+.hint{color:var(--dim2);font-size:10px;text-align:center;margin-top:8px;line-height:1.6}
+.vslot{flex:1;min-height:56px;border:1px dashed var(--line2);border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;font-size:11px;color:var(--dim);position:relative;transition:border-color .15s,color .15s;overflow:hidden}
+.vslot:hover{border-color:var(--sel);color:var(--sel)}
+.vslot span{font-size:10px;color:var(--dim2)}
+.vslot.set{border-style:solid;border-color:var(--sel-dim);padding:5px}
+.vslot canvas{display:block;border-radius:4px}
+.vslot .vx{position:absolute;top:3px;right:4px;width:16px;height:16px;line-height:15px;text-align:center;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:12px;cursor:pointer}
+
+/* ---------- statusbar ---------- */
+.statusbar{
+  height:28px;flex:0 0 28px;border-top:1px solid var(--line);background:var(--bg2);
+  display:flex;align-items:center;gap:16px;padding:0 13px;color:var(--dim2);font-size:10px;
+}
+.statusbar b{color:var(--dim)}
+.statusbar .dot{width:6px;height:6px;border-radius:50%;background:var(--sel)}
+.statusbar .sp{flex:1}
+
+.list::-webkit-scrollbar,.insp::-webkit-scrollbar{width:9px}
+.list::-webkit-scrollbar-thumb,.insp::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px;border:2px solid var(--bg2)}
+
+.toast{
+  position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--bg3);border:1px solid var(--sel);color:var(--txt);
+  padding:10px 18px;border-radius:8px;font-size:11px;opacity:0;transition:.25s;z-index:50;
+  box-shadow:0 10px 30px rgba(0,0,0,.5);
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast b{color:var(--sel)}
+</style>
+</head>
+<body>
+<div class="window" data-screen-label="Voxelizer">
+  <!-- titlebar -->
+  <div class="titlebar">
+    <div class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+    <div class="appname"><b>VOX</b>ELIZER</div>
+    <div class="menu"><span>File</span><span>Edit</span><span>Batch</span><span>View</span><span>Help</span></div>
+    <div class="tb-spacer"></div>
+    <div class="ver">v0.4 · sprite→voxel</div>
+  </div>
+
+  <div class="body">
+    <!-- LEFT: batch -->
+    <div class="panel left">
+      <div class="sec-h"><span>Batch</span><span class="count" id="batchCount">0 items</span></div>
+      <div class="drop" id="drop">
+        <span class="ic">⬓</span>
+        <b>Suelta PNGs aquí</b>
+        <small>o haz clic para elegir · 1 modelo por archivo</small>
+      </div>
+      <input type="file" id="file" accept="image/png,image/*" multiple hidden>
+      <div class="list" id="list"></div>
+    </div>
+
+    <!-- CENTER: viewport -->
+    <div class="viewport">
+      <div class="vp-info">
+        <div class="tag">SOURCE</div>
+        <div id="srcName">—</div>
+        <div id="srcDims" style="color:var(--dim2)">—</div>
+      </div>
+      <div class="vp-toolbar">
+        <div class="tbtn on" id="btnRotate" title="Auto-rotación">↻</div>
+        <div class="tbtn" id="btnGrid" title="Rejilla">▦</div>
+        <div class="tbtn" id="btnWire" title="Mostrar malla / caras">◇</div>
+        <div class="tbtn" id="btnReset" title="Reiniciar cámara">⊹</div>
+      </div>
+      <div id="three"></div>
+      <div class="vp-foot">
+        <div class="stat"><span class="k">Voxels</span><span class="v" id="stVox">—</span></div>
+        <div class="stat"><span class="k">Caras (raw)</span><span class="v" id="stRaw">—</span></div>
+        <div class="stat"><span class="k">Caras (greedy)</span><span class="v good" id="stGreedy">—</span></div>
+        <div class="stat"><span class="k">Reducción</span><span class="v hi" id="stRed">—</span></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: inspector -->
+    <div class="panel right">
+      <div class="sec-h"><span>Inspector</span></div>
+      <div class="insp">
+
+        <div class="grp">
+          <div class="sec-h" style="padding-top:4px"><span>Extrusión</span></div>
+          <div class="ctl">
+            <div class="row"><span class="lbl">Profundidad <span class="flag">--depth</span></span><span class="val" id="vDepth">6</span></div>
+            <input type="range" id="depth" min="1" max="32" value="6">
+            <div class="row" style="margin-top:11px"><span class="lbl">Modo de relieve</span></div>
+            <div class="seg" id="depthModeSeg" style="margin-top:5px">
+              <button data-mode="uniform" class="on">Plano</button>
+              <button data-mode="dt">DT</button>
+              <button data-mode="poisson">Poisson</button>
+              <button data-mode="sfs">SFS</button>
+              <button data-mode="combo">Combo</button>
+              <button data-mode="humanoid">Humano</button>
+            </div>
+            <div class="row" id="reliefRow" style="margin-top:11px;display:none"><span class="lbl">Relieve <span class="flag">--relief</span></span><span class="val" id="vRelief">100%</span></div>
+            <input type="range" id="relief" min="0" max="100" value="100" style="display:none">
+            <div class="row" id="paramRow" style="margin-top:11px;display:none"><span class="lbl" id="paramLbl">Parámetro</span><span class="val" id="vParam">—</span></div>
+            <input type="range" id="modeParam" min="0" max="100" value="100" style="display:none">
+            <div id="humPanel" style="display:none">
+              <div class="row" style="margin-top:11px"><span class="lbl">Profundidad torso</span><span class="val" id="vHumTorso">60%</span></div>
+              <input type="range" id="humTorso" min="30" max="100" value="60">
+              <div class="row" style="margin-top:9px"><span class="lbl">Redondez miembros</span><span class="val" id="vHumRound">100%</span></div>
+              <input type="range" id="humRound" min="0" max="100" value="100">
+              <div class="row" style="margin-top:9px"><span class="lbl">Fuerza del prior</span><span class="val" id="vHumPrior">40%</span></div>
+              <input type="range" id="humPrior" min="0" max="100" value="40">
+              <div class="row" style="margin-top:9px"><span class="lbl">Proporción cabeza</span><span class="val" id="vHumHead">25%</span></div>
+              <input type="range" id="humHead" min="12" max="35" value="25">
+              <div class="row" style="margin-top:9px"><span class="lbl">Suavizado</span><span class="val" id="vHumSmooth">30%</span></div>
+              <input type="range" id="humSmooth" min="0" max="100" value="30">
+            </div>
+            <div class="hint" id="modeHint" style="text-align:left;margin-top:6px">Plano: extrusión uniforme, grosor constante.</div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="sec-h"><span>Multi-vista</span><span class="count">opcional</span></div>
+          <div class="ctl">
+            <div style="display:flex;gap:8px">
+              <div id="slotSide" class="vslot">Perfil<span>+ añadir</span></div>
+              <div id="slotTop" class="vslot">Cenital<span>+ añadir</span></div>
+            </div>
+            <div class="hint" style="text-align:left;margin-top:6px">Frontal + perfil (+ cenital) → profundidad real por intersección de siluetas (visual hull). Alinea las vistas en altura. Sin vistas extra, se usa el inflado de una vista.</div>
+          </div>
+        </div>
+        <input type="file" id="fileSide" accept="image/*" style="display:none">
+        <input type="file" id="fileTop" accept="image/*" style="display:none">
+
+        <div class="grp">
+          <div class="sec-h"><span>Sprite</span></div>
+          <div class="ctl">
+            <div class="row"><span class="lbl">Umbral alpha <span class="flag">--alpha</span></span><span class="val" id="vAlpha">40</span></div>
+            <input type="range" id="alpha" min="0" max="255" value="40">
+            <div class="row" style="margin-top:11px"><span class="lbl">Spritesheet <span class="flag">--sheet</span></span>
+              <span style="display:flex;align-items:center;gap:5px">
+                <input class="num" id="sheetC" value="1" type="number" min="1" max="16"> × <input class="num" id="sheetR" value="1" type="number" min="1" max="16">
+              </span>
+            </div>
+            <div class="row" id="frameRow" style="display:none"><span class="lbl">Frame</span>
+              <span style="display:flex;align-items:center;gap:8px"><span class="val" id="vFrame">1 / 1</span>
+              <span class="tbtn" id="framePrev" style="width:24px;height:24px;font-size:12px">‹</span>
+              <span class="tbtn" id="frameNext" style="width:24px;height:24px;font-size:12px">›</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="sec-h"><span>Paleta</span><span class="count" id="palCount">—</span></div>
+          <div class="ctl">
+            <div class="row"><span class="lbl">Máx. colores</span><span class="val" id="vColors">32</span></div>
+            <input type="range" id="colors" min="2" max="64" value="32">
+          </div>
+          <div class="swatches" id="swatches"></div>
+        </div>
+
+        <div class="grp">
+          <div class="sec-h"><span>Malla</span></div>
+          <div class="ctl">
+            <div class="row"><span class="lbl">Greedy meshing</span><div class="toggle on" id="greedy"></div></div>
+            <div class="hint" style="text-align:left">Fusiona caras coplanares del mismo color. <span id="greedyState" style="color:var(--sel)">activado</span>.</div>
+            <div class="row" style="margin-top:11px"><span class="lbl">Oclusión ambiental <span class="flag">--ao</span></span><div class="toggle" id="ao"></div></div>
+            <div class="row" id="aoRow" style="margin-top:9px;display:none"><span class="lbl">Intensidad AO</span><span class="val" id="vAoStr">80%</span></div>
+            <input type="range" id="aoStr" min="0" max="100" value="80" style="display:none">
+            <div class="row" style="margin-top:11px"><span class="lbl">Escala voxel <span class="flag">--scale</span></span><span class="val" id="vScale">1.0</span></div>
+            <input type="range" id="scale" min="1" max="40" value="10">
+          </div>
+        </div>
+
+        <div class="grp" style="border:0">
+          <div class="sec-h"><span>Exportar</span><span class="flag">--formats</span></div>
+          <div class="ctl">
+            <label class="chk on" id="fmtVox"><span class="box">✓</span> .vox <span class="fmt-meta">MagicaVoxel · Z-up</span></label>
+            <label class="chk on" id="fmtObj"><span class="box">✓</span> .obj + .mtl <span class="fmt-meta">Unity/Godot · Y-up</span></label>
+          </div>
+          <div class="export">
+            <button class="btn" id="exportBtn">⬇ Exportar modelo</button>
+            <div class="hint">Z-up para MagicaVoxel · Y-up para engines.<br>Un material por color del sprite.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- statusbar -->
+  <div class="statusbar">
+    <span class="dot"></span><b id="statMain">Listo</b>
+    <span class="sp"></span>
+    <span id="statDims">—</span>
+    <span>greedy meshing · numpy vectorizado</span>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- thumbnail for bundler splash -->
+<template id="__bundler_thumbnail">
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+<rect width="100" height="100" fill="#1c1d22"/>
+<g fill="#ff8a3d"><rect x="34" y="30" width="14" height="14"/><rect x="48" y="36" width="14" height="14"/><rect x="34" y="44" width="14" height="14"/></g>
+<g fill="#3fbacb"><rect x="48" y="50" width="14" height="14"/><rect x="34" y="58" width="14" height="14"/></g>
+</svg>
+</template>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="data.js"></script>
+<script src="voxel.js"></script>
+<script src="voxio.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
