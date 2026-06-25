@@ -1,5 +1,5 @@
 /* app.js — Three.js scene + UI wiring for the Voxelizer prototype.
-   Depends on globals: THREE, THREE.OrbitControls, SAMPLE_SPRITES, Voxel. */
+   Depends on globals: THREE, THREE.OrbitControls, SAMPLE_SPRITES, Voxel, ZipUtil. */
 (function () {
   'use strict';
 
@@ -9,12 +9,17 @@
     sourceCanvas: null,  // full source canvas (pre-slice)
     name: '—',
     opts: { depth: 6, alpha: 40, colors: 32, greedy: true, depthMode: 'uniform', relief: 1.0, scale: 1.0,
+            inputCap: 96,
             dtRound: 1.0, poissonTension: 0.0, sfsGamma: 1.0, comboMix: 0.5, ao: false, aoStrength: 0.8,
             humTorso: 0.6, humRound: 1.0, humPrior: 0.4, humHead: 0.25, humSmooth: 0.3 },
     sheet: { c: 1, r: 1, frame: 0 },
     views: { side: null, top: null },   // canvases opcionales para la vista actual
     showWire: false, showGrid: false, autoRotate: true,
     last: null,          // last voxelize() result
+    busy: false,
+    batchBusy: false,
+    batchCancelRequested: false,
+    batchProgress: { visible: false, done: 0, total: 0, label: 'Listo' },
   };
 
   // ---------- three setup ----------
@@ -123,48 +128,170 @@
   }
 
   // ---------- sheet slicing ----------
-  function sliceFrame() {
-    const src = state.sourceCanvas;
+  function frameCount(sheet) {
+    return Math.max(1, (sheet.c | 0) * (sheet.r | 0));
+  }
+  function frameLabel(frame, total) {
+    const width = String(total).length;
+    return `_f${String(frame + 1).padStart(width, '0')}`;
+  }
+  function sliceFrameFromCanvas(src, sheet, frame) {
     if (!src) return null;
-    const cols = state.sheet.c, rows = state.sheet.r;
+    const cols = Math.max(1, sheet.c | 0), rows = Math.max(1, sheet.r | 0);
     if (cols <= 1 && rows <= 1) { return Voxel.canvasToPixels(src); }
     const fw = Math.floor(src.width / cols), fh = Math.floor(src.height / rows);
     const total = cols * rows;
-    state.sheet.frame = Math.max(0, Math.min(state.sheet.frame, total - 1));
-    const fx = (state.sheet.frame % cols) * fw;
-    const fy = Math.floor(state.sheet.frame / cols) * fh;
+    const safeFrame = Math.max(0, Math.min(frame, total - 1));
+    const fx = (safeFrame % cols) * fw;
+    const fy = Math.floor(safeFrame / cols) * fh;
     const cv = document.createElement('canvas');
     cv.width = fw; cv.height = fh;
     cv.getContext('2d').drawImage(src, fx, fy, fw, fh, 0, 0, fw, fh);
     return Voxel.canvasToPixels(cv);
   }
+  function sliceFrame() {
+    return sliceFrameFromCanvas(state.sourceCanvas, state.sheet, state.sheet.frame);
+  }
+
+  function getItemViews(rec) {
+    const views = {};
+    if (rec.side) views.side = Voxel.canvasToPixels(rec.side);
+    if (rec.top) views.top = Voxel.canvasToPixels(rec.top);
+    return views;
+  }
+
+  function createVoxelWorkerChannel() {
+    let worker = null;
+    let nextJobId = 0;
+    let useMainThread = (typeof Worker === 'undefined');
+    const pending = new Map();
+
+    function shutdown() {
+      if (!worker) return;
+      worker.terminate();
+      worker = null;
+    }
+
+    function ensureWorker() {
+      if (useMainThread) return null;
+      if (worker) return worker;
+      try {
+        worker = new Worker('worker.js');
+      } catch (_error) {
+        useMainThread = true;
+        shutdown();
+        return null;
+      }
+      worker.onmessage = ({ data }) => {
+        const job = pending.get(data.jobId);
+        if (!job) return;
+        pending.delete(data.jobId);
+        if (data.ok) job.resolve(data.result);
+        else job.reject(new Error(data.error || 'Fallo de voxelización en worker'));
+      };
+      worker.onerror = (event) => {
+        const jobs = [...pending.values()];
+        pending.clear();
+        shutdown();
+        const error = new Error(event.message || 'No se pudo iniciar el worker de voxelización');
+        jobs.forEach(job => job.reject(error));
+      };
+      return worker;
+    }
+
+    function run(pixels, opts, views) {
+      const activeWorker = ensureWorker();
+      if (!activeWorker) {
+        return Promise.resolve(Voxel.voxelize(pixels, opts, views || {}));
+      }
+      return new Promise((resolve, reject) => {
+        const jobId = `job-${++nextJobId}`;
+        pending.set(jobId, { resolve, reject });
+        activeWorker.postMessage({ jobId, pixels, opts, views: views || {} });
+      });
+    }
+
+    function cancelAll(reason = 'cancelled') {
+      if (!pending.size && !worker) return;
+      const jobs = [...pending.values()];
+      pending.clear();
+      shutdown();
+      const error = new Error(reason);
+      jobs.forEach(job => job.reject(error));
+    }
+
+    return { run, cancelAll };
+  }
+
+  const previewWorker = createVoxelWorkerChannel();
+  const batchWorker = createVoxelWorkerChannel();
+
+  function spawnVoxelTask(pixels, opts, views) {
+    return batchWorker.run(pixels, opts, views);
+  }
+
+  function cancelPreviewJob(reason = 'stale') {
+    previewWorker.cancelAll(reason);
+  }
+  function voxelizePreview(pixels, opts, views) {
+    cancelPreviewJob();
+    return previewWorker.run(pixels, opts, views);
+  }
 
   // ---------- recompute (debounced to a frame) ----------
   let raf = 0;
+  let renderSeq = 0;
   function recompute() {
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(run);
   }
-  function run() {
+  async function run() {
     if (!state.sourceCanvas) return;
-    state.pixels = sliceFrame();
-    if (!state.pixels) return;
+    const seq = ++renderSeq;
+    const pixels = sliceFrame();
+    if (!pixels) return;
+    state.pixels = pixels;
+    state.last = null;
     const t0 = performance.now();
-    const views = {};
-    if (state.views.side) views.side = Voxel.canvasToPixels(state.views.side);
-    if (state.views.top) views.top = Voxel.canvasToPixels(state.views.top);
-    const result = Voxel.voxelize(state.pixels, state.opts, views);
-    const ms = (performance.now() - t0);
-    state.last = result;
-    buildModel(result);
-    updateReadouts(result, ms);
+    const views = getItemViews(items.find(it => it.canvas === state.sourceCanvas) || {});
+    state.busy = true;
+    refreshActionState();
+    $('statMain').textContent = 'Voxelizando…';
+    try {
+      const result = await voxelizePreview(pixels, { ...state.opts }, views);
+      if (seq !== renderSeq) return;
+      const ms = (performance.now() - t0);
+      state.last = result;
+      buildModel(result);
+      updateReadouts(result, ms);
+    } catch (error) {
+      if (error.message === 'stale') return;
+      state.last = null;
+      $('statMain').textContent = 'Error de voxelización';
+      toast(error.message || 'No se pudo voxelizar el sprite');
+    } finally {
+      if (seq === renderSeq) state.busy = false;
+      if (seq === renderSeq) refreshActionState();
+    }
   }
 
   // ---------- readouts ----------
   const $ = id => document.getElementById(id);
   function fmt(n) { return n.toLocaleString('en-US'); }
+  function setPressed(el, on) {
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  function bindPseudoButton(el, action) {
+    el.addEventListener('click', action);
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        action(e);
+      }
+    });
+  }
   function updateReadouts(r, ms) {
-    const g = state.opts.greedy ? r.greedyFacesList.length : (r.naiveFacesList ? r.naiveFacesList.length : r.greedyFacesList.length);
     $('stVox').textContent = fmt(r.voxels);
     $('stRaw').textContent = fmt(r.naiveCount);
     $('stGreedy').textContent = fmt(r.greedyFacesList.length);
@@ -172,10 +299,14 @@
     $('stRed').textContent = '−' + red.toFixed(0) + '%';
     $('srcDims').textContent = `${state.pixels.w}×${state.pixels.h} px · ${r.dims[2]} capas Z`;
     $('palCount').textContent = r.palette.length + ' colores';
-    $('statDims').innerHTML = `<b>${r.dims[0]}×${r.dims[1]}×${r.dims[2]}</b> grid`;
+    const statDims = $('statDims');
+    const dimsStrong = document.createElement('b');
+    dimsStrong.textContent = `${r.dims[0]}×${r.dims[1]}×${r.dims[2]}`;
+    statDims.replaceChildren(dimsStrong, document.createTextNode(' grid'));
     $('statMain').textContent = `Voxelizado en ${ms.toFixed(0)} ms`;
     // swatches
-    const sw = $('swatches'); sw.innerHTML = '';
+    const sw = $('swatches');
+    sw.replaceChildren();
     r.palette.slice(0, 28).forEach(c => {
       const i = document.createElement('i');
       i.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
@@ -197,6 +328,15 @@
   }
 
   const items = []; // {name, canvas, el, status}
+  function setItemStatus(rec, status, label) {
+    rec.st.className = 'st ' + status;
+    rec.st.textContent = label || ({
+      done: 'OK',
+      queued: 'cola',
+      progress: 'PROC',
+      err: 'ERR',
+    }[status] || status);
+  }
   function addItem(name, canvas, status = 'queued', select = false) {
     const el = document.createElement('div');
     el.className = 'item';
@@ -206,18 +346,24 @@
     const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = name;
     const sub = document.createElement('div'); sub.className = 'sub'; sub.textContent = `${canvas.width}×${canvas.height}`;
     meta.appendChild(nm); meta.appendChild(sub);
-    const st = document.createElement('span'); st.className = 'st ' + status; st.textContent = status === 'done' ? 'OK' : 'cola';
+    const st = document.createElement('span');
     el.appendChild(meta); el.appendChild(st);
     const rec = { name, canvas, el, st };
-    el.onclick = () => selectItem(rec);
+    setItemStatus(rec, status);
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', `Abrir sprite ${name}`);
+    bindPseudoButton(el, () => selectItem(rec));
     document.getElementById('list').appendChild(el);
     items.push(rec);
     updateBatchCount();
+    refreshActionState();
     if (select) selectItem(rec);
     return rec;
   }
   function updateBatchCount() {
     document.getElementById('batchCount').textContent = items.length + (items.length === 1 ? ' item' : ' items');
+    refreshActionState();
   }
   function selectItem(rec) {
     items.forEach(it => it.el.classList.toggle('active', it === rec));
@@ -228,8 +374,10 @@
     fillSlot('side', state.views.side);
     fillSlot('top', state.views.top);
     $('srcName').textContent = rec.name;
-    rec.st.className = 'st done'; rec.st.textContent = 'OK';
+    state.last = null;
+    setItemStatus(rec, 'done');
     updateFrameUI();
+    refreshActionState();
     run();
   }
 
@@ -237,16 +385,25 @@
   function fillSlot(kind, canvas) {
     const el = $(kind === 'side' ? 'slotSide' : 'slotTop');
     const label = kind === 'side' ? 'Perfil' : 'Cenital';
-    el.innerHTML = '';
+    el.replaceChildren();
     if (canvas) {
       el.classList.add('set');
+      el.setAttribute('aria-label', `${label} cargado. Pulsa para reemplazar la imagen.`);
       el.appendChild(thumbCanvas(canvas, 46));
-      const x = document.createElement('div'); x.className = 'vx'; x.textContent = '×';
-      x.onclick = e => { e.stopPropagation(); setView(kind, null); };
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'vx';
+      x.textContent = '×';
+      x.setAttribute('aria-label', `Quitar vista ${label.toLowerCase()}`);
+      x.addEventListener('click', e => { e.stopPropagation(); setView(kind, null); });
       el.appendChild(x);
     } else {
       el.classList.remove('set');
-      el.innerHTML = `${label}<span>+ añadir</span>`;
+      el.setAttribute('aria-label', `Añadir vista ${label.toLowerCase()}`);
+      const text = document.createTextNode(label);
+      const hint = document.createElement('span');
+      hint.textContent = '+ añadir';
+      el.append(text, hint);
     }
   }
   function setView(kind, canvas) {
@@ -262,7 +419,7 @@
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      const cap = 96;                       // cap native resolution for performance
+      const cap = Math.max(32, state.opts.inputCap | 0);
       let w = img.naturalWidth, h = img.naturalHeight;
       const sc = Math.min(1, cap / Math.max(w, h));
       w = Math.max(1, Math.round(w * sc)); h = Math.max(1, Math.round(h * sc));
@@ -274,19 +431,19 @@
       URL.revokeObjectURL(url);
       cb(cv, file.name);
     };
-    img.onerror = () => toast('No se pudo leer la imagen');
+    img.onerror = () => { URL.revokeObjectURL(url); toast('No se pudo leer la imagen'); };
     img.src = url;
   }
   function loadImageFile(file) {
     fileToCanvas(file, (cv, name) => {
       addItem(name, cv, 'done', true);
-      toast(`<b>${name}</b> cargado`);
+      toast([{ accent: name }, { text: ' cargado' }]);
     });
   }
 
   // ---------- frame UI ----------
   function updateFrameUI() {
-    const total = state.sheet.c * state.sheet.r;
+    const total = frameCount(state.sheet);
     const row = $('frameRow');
     if (total > 1) {
       row.style.display = '';
@@ -296,35 +453,201 @@
     }
   }
 
+  function setBatchProgress(visible, done, total, label) {
+    state.batchProgress = { visible, done, total, label };
+    $('batchProgress').hidden = !visible;
+    $('cancelBatchBtn').hidden = !visible;
+    $('cancelBatchBtn').disabled = !state.batchBusy;
+    $('batchProgressLabel').textContent = label || 'Preparando lote…';
+    $('batchProgressCount').textContent = total ? `${done} / ${total}` : '0 / 0';
+    $('batchProgressBar').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
+  }
+
+  function refreshActionState() {
+    $('exportBtn').disabled = !state.last || state.busy || state.batchBusy;
+    $('exportBatchBtn').disabled = !items.length || state.batchBusy;
+    $('cancelBatchBtn').disabled = !state.batchBusy;
+  }
+
   function download(name, text) {
     const blob = new Blob([text], { type: 'text/plain' });
+    downloadBlob(name, blob);
+  }
+  function downloadBlob(name, blob) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
+  function baseName(name) {
+    return name.replace(/\.[a-z0-9]+$/i, '');
+  }
+  function collectResultFiles(base, result, wantObj, wantVox, opts = state.opts) {
+    const files = [];
+    if (wantObj) {
+      const { obj, mtl } = VoxIO.exportOBJ(result, {
+        scale: opts.scale,
+        useAO: opts.ao,
+        aoStrength: opts.aoStrength,
+        annotateAO: Voxel.annotateAO,
+        mtlName: base + '.mtl',
+      });
+      files.push({ name: base + '.obj', data: obj, type: 'text/plain' });
+      files.push({ name: base + '.mtl', data: mtl, type: 'text/plain' });
+    }
+    if (wantVox) {
+      const bytes = VoxIO.exportVox(result);
+      files.push({ name: base + '.vox', data: bytes, type: 'application/octet-stream' });
+    }
+    return files;
+  }
+
+  function exportResultFiles(base, result, wantObj, wantVox, opts = state.opts) {
+    const files = collectResultFiles(base, result, wantObj, wantVox, opts);
+    files.forEach(file => downloadBlob(file.name, new Blob([file.data], { type: file.type })));
+    return files.length;
+  }
+
+  function batchZipName(totalJobs) {
+    const now = new Date();
+    const pad = v => String(v).padStart(2, '0');
+    return `voxelizer-batch-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${totalJobs}jobs.zip`;
+  }
+
+  async function buildResultForItem(rec, frame, opts, sheet) {
+    const pixels = sliceFrameFromCanvas(rec.canvas, sheet, frame);
+    if (!pixels) throw new Error(`No se pudo leer ${rec.name}`);
+    return spawnVoxelTask(pixels, opts, getItemViews(rec));
+  }
+
+  function cancelBatchExport() {
+    if (!state.batchBusy) return;
+    state.batchCancelRequested = true;
+    $('statMain').textContent = 'Cancelando lote…';
+    setBatchProgress(true, state.batchProgress.done, state.batchProgress.total, 'Cancelando lote…');
+    batchWorker.cancelAll('cancelled');
+  }
+
+  async function exportBatch() {
+    if (!items.length) { toast('No hay sprites cargados para exportar'); return; }
+    if (state.batchBusy) { toast('Ya hay un batch en curso'); return; }
+    const wantObj = $('fmtObj').classList.contains('on');
+    const wantVox = $('fmtVox').classList.contains('on');
+    if (!wantObj && !wantVox) { toast('Selecciona al menos un formato'); return; }
+    if (!window.ZipUtil || typeof window.ZipUtil.createZip !== 'function') {
+      throw new Error('No se pudo inicializar el empaquetado ZIP');
+    }
+    cancelPreviewJob('stale');
+    const batchOpts = { ...state.opts };
+    const batchSheet = { ...state.sheet };
+    const totalFrames = frameCount(batchSheet);
+    const totalJobs = items.length * totalFrames;
+    let finished = 0, files = 0, failures = 0;
+    const archiveFiles = [];
+    let cancelled = false;
+    let failed = false;
+    state.batchBusy = true;
+    state.batchCancelRequested = false;
+    items.forEach(rec => setItemStatus(rec, 'queued'));
+    $('statMain').textContent = `Exportando lote 0/${totalJobs}`;
+    setBatchProgress(true, 0, totalJobs, 'Preparando lote…');
+    refreshActionState();
+    try {
+      for (const rec of items) {
+        setItemStatus(rec, 'progress', totalFrames > 1 ? `0/${totalFrames}` : 'PROC');
+        for (let frame = 0; frame < totalFrames; frame++) {
+          if (state.batchCancelRequested) throw new Error('cancelled');
+          const suffix = totalFrames > 1 ? frameLabel(frame, totalFrames) : '';
+          const exportName = baseName(rec.name) + suffix;
+          try {
+            const result = await buildResultForItem(rec, frame, batchOpts, batchSheet);
+            const outFiles = collectResultFiles(exportName, result, wantObj, wantVox, batchOpts);
+            archiveFiles.push(...outFiles);
+            files += outFiles.length;
+            setItemStatus(rec, 'progress', totalFrames > 1 ? `${frame + 1}/${totalFrames}` : 'PROC');
+          } catch (error) {
+            if (error.message === 'cancelled') throw error;
+            failures++;
+            setItemStatus(rec, 'err');
+            console.error(error);
+          }
+          finished++;
+          $('statMain').textContent = `Exportando lote ${finished}/${totalJobs}`;
+          setBatchProgress(true, finished, totalJobs, rec.name);
+        }
+        if (!rec.st.classList.contains('err')) setItemStatus(rec, 'done');
+      }
+      if (!archiveFiles.length) {
+        throw new Error('El batch no generó archivos exportables');
+      }
+      const zipName = batchZipName(totalJobs);
+      const zipBytes = window.ZipUtil.createZip(archiveFiles);
+      downloadBlob(zipName, new Blob([zipBytes], { type: 'application/zip' }));
+      if (failures) {
+        toast([{ text: `Batch listo con ${failures} error(es) · ZIP: ` }, { accent: zipName }, { text: ` · archivos: ${files}` }]);
+      } else {
+        toast([{ text: 'Batch exportado en ' }, { accent: zipName }, { text: ` · archivos: ${files}` }]);
+      }
+    } catch (error) {
+      if (error.message !== 'cancelled') {
+        failed = true;
+        throw error;
+      }
+      cancelled = true;
+      toast('Batch cancelado');
+    } finally {
+      state.batchBusy = false;
+      state.batchCancelRequested = false;
+      setBatchProgress(false, 0, 0, 'Listo');
+      refreshActionState();
+      if (cancelled) $('statMain').textContent = 'Batch cancelado';
+      else if (failed) $('statMain').textContent = 'Error de batch';
+      else if (state.last) $('statMain').textContent = 'Batch completado';
+    }
+  }
 
   // ---------- toast ----------
   let toastT = 0;
-  function toast(html) {
-    const t = $('toast'); t.innerHTML = html; t.classList.add('show');
+  function toast(parts) {
+    const t = $('toast');
+    const list = Array.isArray(parts) ? parts : [{ text: String(parts) }];
+    t.replaceChildren();
+    list.forEach(part => {
+      if (part.accent) {
+        const strong = document.createElement('b');
+        strong.textContent = part.accent;
+        t.appendChild(strong);
+      }
+      if (part.text) t.appendChild(document.createTextNode(part.text));
+    });
+    t.classList.add('show');
     clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200);
   }
 
   // ================= WIRE UP CONTROLS =================
-  function slider(id, valId, fn, fmt) {
+  function slider(id, valId, fn, fmt, trigger = true) {
     const el = $(id);
-    el.addEventListener('input', () => { fn(+el.value); if (valId) $(valId).textContent = fmt ? fmt(+el.value) : el.value; recompute(); });
+    el.addEventListener('input', () => {
+      fn(+el.value);
+      if (valId) $(valId).textContent = fmt ? fmt(+el.value) : el.value;
+      if (trigger) recompute();
+    });
   }
   slider('depth', 'vDepth', v => state.opts.depth = v);
   slider('alpha', 'vAlpha', v => state.opts.alpha = v);
   slider('colors', 'vColors', v => state.opts.colors = v);
   slider('scale', 'vScale', v => state.opts.scale = v / 10, v => (v / 10).toFixed(1));
+  slider('inputCap', 'vInputCap', v => state.opts.inputCap = v, v => `${v} px`, false);
 
   function toggle(id, fn) {
     const el = $(id);
-    el.addEventListener('click', () => { const on = el.classList.toggle('on'); fn(on); recompute(); });
+    el.addEventListener('click', () => {
+      const on = !el.classList.contains('on');
+      setPressed(el, on);
+      fn(on);
+      recompute();
+    });
   }
   toggle('greedy', on => {
     state.opts.greedy = on;
@@ -399,47 +722,40 @@
   $('frameNext').addEventListener('click', () => { const t = state.sheet.c * state.sheet.r; state.sheet.frame = (state.sheet.frame + 1) % t; updateFrameUI(); run(); });
 
   // format checkboxes
-  function chk(id) { const el = $(id); el.addEventListener('click', () => el.classList.toggle('on')); }
+  function chk(id) {
+    const el = $(id);
+    el.addEventListener('click', () => setPressed(el, !el.classList.contains('on')));
+  }
   chk('fmtVox'); chk('fmtObj');
 
   // viewport toolbar
-  $('btnRotate').addEventListener('click', e => { state.autoRotate = !state.autoRotate; controls.autoRotate = state.autoRotate; e.currentTarget.classList.toggle('on', state.autoRotate); });
-  $('btnGrid').addEventListener('click', e => { state.showGrid = !state.showGrid; grid.visible = state.showGrid; e.currentTarget.classList.toggle('on', state.showGrid); });
-  $('btnWire').addEventListener('click', e => { state.showWire = !state.showWire; if (wire) wire.visible = state.showWire; e.currentTarget.classList.toggle('on', state.showWire); });
+  $('btnRotate').addEventListener('click', e => { state.autoRotate = !state.autoRotate; controls.autoRotate = state.autoRotate; setPressed(e.currentTarget, state.autoRotate); });
+  $('btnGrid').addEventListener('click', e => { state.showGrid = !state.showGrid; grid.visible = state.showGrid; setPressed(e.currentTarget, state.showGrid); });
+  $('btnWire').addEventListener('click', e => { state.showWire = !state.showWire; if (wire) wire.visible = state.showWire; setPressed(e.currentTarget, state.showWire); });
   $('btnReset').addEventListener('click', () => { camera.position.set(60, 55, 90); controls.target.set(0, 0, 0); });
 
   // export
   $('exportBtn').addEventListener('click', () => {
-    if (!state.last) return;
+    if (!state.last || state.busy) { toast('Esperá a que termine la voxelización actual'); return; }
     const wantObj = $('fmtObj').classList.contains('on');
     const wantVox = $('fmtVox').classList.contains('on');
     if (!wantObj && !wantVox) { toast('Selecciona al menos un formato'); return; }
-    const base = state.name.replace(/\.[a-z0-9]+$/i, '');
+    const base = baseName(state.name);
     const out = [];
-    if (wantObj) {
-      const { obj, mtl } = VoxIO.exportOBJ(state.last, {
-        scale: state.opts.scale,
-        useAO: state.opts.ao,
-        aoStrength: state.opts.aoStrength,
-        annotateAO: Voxel.annotateAO,
-        mtlName: base + '.mtl',
-      });
-      download(base + '.obj', obj);
-      download(base + '.mtl', mtl);
-      out.push('.obj+.mtl');
-    }
-    if (wantVox) {
-      const bytes = VoxIO.exportVox(state.last);
-      const blob = new Blob([bytes], { type: 'application/octet-stream' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = base + '.vox';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-      out.push('.vox');
-    }
-    toast(`Exportado <b>${base}</b> → ${out.join(' · ')}`);
+    exportResultFiles(base, state.last, wantObj, wantVox);
+    if (wantObj) out.push('.obj+.mtl');
+    if (wantVox) out.push('.vox');
+    toast([{ text: 'Exportado ' }, { accent: base }, { text: ` → ${out.join(' · ')}` }]);
   });
+  $('cancelBatchBtn').addEventListener('click', cancelBatchExport);
+  $('exportBatchBtn').addEventListener('click', () => { exportBatch().catch(err => {
+    console.error(err);
+    state.batchBusy = false;
+    state.batchCancelRequested = false;
+    setBatchProgress(false, 0, 0, 'Listo');
+    refreshActionState();
+    toast(err.message || 'No se pudo exportar el batch');
+  }); });
 
   // drop + file picker
   const drop = $('drop'), fileIn = $('file');
@@ -450,8 +766,8 @@
   drop.addEventListener('drop', e => { [...e.dataTransfer.files].filter(f => f.type.startsWith('image')).forEach(loadImageFile); });
 
   // multi-view slot pickers (+ drag-drop onto a slot)
-  $('slotSide').addEventListener('click', () => $('fileSide').click());
-  $('slotTop').addEventListener('click', () => $('fileTop').click());
+  bindPseudoButton($('slotSide'), () => $('fileSide').click());
+  bindPseudoButton($('slotTop'), () => $('fileTop').click());
   $('fileSide').addEventListener('change', () => { const f = $('fileSide').files[0]; if (f) fileToCanvas(f, cv => setView('side', cv)); $('fileSide').value = ''; });
   $('fileTop').addEventListener('change', () => { const f = $('fileTop').files[0]; if (f) fileToCanvas(f, cv => setView('top', cv)); $('fileTop').value = ''; });
   [['slotSide', 'side'], ['slotTop', 'top']].forEach(([id, kind]) => {
@@ -467,6 +783,8 @@
 
   // ---------- boot: render sample sprites ----------
   function boot() {
+    setBatchProgress(false, 0, 0, 'Listo');
+    refreshActionState();
     resize();
     requestAnimationFrame(resize);
     setTimeout(resize, 120);

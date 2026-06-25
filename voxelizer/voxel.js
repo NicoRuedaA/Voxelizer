@@ -543,4 +543,5 @@ function annotateAO(faces, grid, dims, strength) {
   return faces;
 }
 
-window.Voxel = { canvasToPixels, voxelize, annotateAO };
+const voxelRoot = (typeof window !== 'undefined') ? window : globalThis;
+voxelRoot.Voxel = { canvasToPixels, voxelize, annotateAO };

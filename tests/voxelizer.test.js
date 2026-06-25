@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function loadRuntime() {
-  const context = { window: {}, console };
+  const context = { window: {}, console, TextEncoder };
   vm.createContext(context);
   const root = path.resolve(__dirname, '..', 'voxelizer');
   const files = ['voxel.js', 'voxio.js'];
@@ -17,6 +17,31 @@ function loadRuntime() {
     Voxel: context.window.Voxel,
     VoxIO: context.window.VoxIO,
   };
+}
+
+function loadScript(file, context) {
+  const root = path.resolve(__dirname, '..', 'voxelizer');
+  const source = fs.readFileSync(path.join(root, file), 'utf8');
+  vm.runInContext(source, context, { filename: file });
+}
+
+function readZipEntries(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const tail = bytes.byteLength - 22;
+  assert.equal(view.getUint32(tail, true), 0x06054b50);
+  const total = view.getUint16(tail + 10, true);
+  let offset = view.getUint32(tail + 16, true);
+  const decoder = new TextDecoder();
+  const names = [];
+  for (let i = 0; i < total; i++) {
+    assert.equal(view.getUint32(offset, true), 0x02014b50);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    names.push(decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLen)));
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return names;
 }
 
 function makePixels(w, h, fn) {
@@ -105,4 +130,25 @@ test('exportOBJ referencia el MTL solicitado con AO', () => {
   assert.match(exported.obj, /mtllib hero-ao\.mtl/);
   assert.match(exported.obj, /usemtl voxel/);
   assert.doesNotMatch(exported.obj, /mtllib model\.mtl/);
+});
+
+test('voxel.js expone Voxel en globalThis para compatibilidad con workers', () => {
+  const context = { console };
+  vm.createContext(context);
+  loadScript('voxel.js', context);
+  assert.ok(context.Voxel);
+  assert.equal(typeof context.Voxel.voxelize, 'function');
+});
+
+test('zip.js empaqueta multiples archivos en un ZIP valido', () => {
+  const context = { window: {}, console, TextEncoder };
+  vm.createContext(context);
+  loadScript('zip.js', context);
+  const zip = context.window.ZipUtil.createZip([
+    { name: 'hero.obj', data: 'v 0 0 0\n' },
+    { name: 'hero.mtl', data: 'newmtl voxel\n' },
+    { name: 'hero.vox', data: new Uint8Array([1, 2, 3, 4]) },
+  ], new Date('2024-01-02T03:04:05Z'));
+  assert.ok(ArrayBuffer.isView(zip));
+  assert.deepEqual(readZipEntries(zip), ['hero.obj', 'hero.mtl', 'hero.vox']);
 });

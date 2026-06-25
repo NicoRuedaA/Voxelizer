@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check browser scripts
+        run: |
+          node --check voxelizer/app.js
+          node --check voxelizer/voxel.js
+          node --check voxelizer/voxio.js
+          node --check voxelizer/worker.js
+          node --check voxelizer/zip.js
+
+      - name: Run regression tests
+        run: node --test tests/voxelizer.test.js

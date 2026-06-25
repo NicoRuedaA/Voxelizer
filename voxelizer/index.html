@@ -4,9 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Voxelizer — sprite → voxel</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg0:#15161a;        /* desktop behind window */
@@ -24,11 +21,12 @@
   --sel:#3fbacb;        /* selection / active (teal, matched chroma) */
   --sel-dim:rgba(63,186,203,0.16);
   --grid:#23252c;
-  --ui:'JetBrains Mono',ui-monospace,monospace;
-  --pix:'Silkscreen',var(--ui);
+  --ui:'Cascadia Mono','Consolas',ui-monospace,monospace;
+  --pix:var(--ui);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
+button,input,select{font:inherit}
 body{
   background:
     radial-gradient(1200px 700px at 70% -10%, #20222a 0%, var(--bg0) 60%);
@@ -85,7 +83,7 @@ body{
 .drop{
   margin:4px 12px 10px;border:1.5px dashed var(--line2);border-radius:7px;
   padding:16px 10px;text-align:center;color:var(--dim);cursor:pointer;
-  transition:.13s;background:var(--bg1);
+  transition:.13s;background:var(--bg1);width:calc(100% - 24px);appearance:none;
 }
 .drop:hover,.drop.over{border-color:var(--accent);color:var(--txt);background:#26221d}
 .drop .ic{font-size:18px;display:block;margin-bottom:5px;opacity:.8}
@@ -110,6 +108,8 @@ body{
 .item .st{font-size:9px;font-family:var(--pix);padding:2px 5px;border-radius:4px}
 .st.done{color:var(--sel);background:var(--sel-dim)}
 .st.queued{color:var(--dim);background:var(--bg4)}
+.st.progress{color:var(--accent);background:rgba(255,149,87,.12)}
+.st.err{color:#ff8f8f;background:rgba(255,96,96,.12)}
 
 /* ---------- viewport ---------- */
 .vp-toolbar{
@@ -119,6 +119,7 @@ body{
   width:30px;height:30px;border-radius:6px;border:1px solid var(--line2);
   background:rgba(28,30,36,.72);backdrop-filter:blur(6px);color:var(--dim);
   cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;
+  padding:0;appearance:none;
 }
 .tbtn:hover{color:var(--txt);border-color:var(--line2);background:var(--bg3)}
 .tbtn.on{color:var(--sel);border-color:var(--sel);background:var(--sel-dim)}
@@ -167,6 +168,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .toggle{
   width:38px;height:21px;border-radius:11px;background:var(--bg4);position:relative;
   cursor:pointer;flex:0 0 38px;transition:.15s;border:1px solid var(--line2);
+  padding:0;appearance:none;
 }
 .toggle::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--dim);transition:.15s}
 .toggle.on{background:var(--sel-dim);border-color:var(--sel)}
@@ -183,7 +185,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .swatches{display:flex;flex-wrap:wrap;gap:4px;padding:2px 14px 0}
 .swatches i{width:15px;height:15px;border-radius:3px;border:1px solid rgba(255,255,255,.12);display:block}
 
-.chk{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0}
+.chk{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0;background:none;border:0;color:var(--txt);width:100%;text-align:left}
 .box{width:16px;height:16px;border-radius:4px;border:1px solid var(--line2);background:var(--bg3);display:flex;align-items:center;justify-content:center;color:transparent;font-size:11px}
 .chk.on .box{background:var(--accent);border-color:var(--accent);color:#1a1206}
 .fmt-meta{color:var(--dim2);font-size:10px;margin-left:auto}
@@ -196,13 +198,37 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 }
 .btn:hover{background:#ffa05c}
 .btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn.secondary{background:var(--sel);color:#06212a;margin-top:8px}
+.btn.secondary:hover{background:#65d4e2}
+.btn.ghost{margin-top:8px;background:transparent;color:var(--dim);border:1px solid var(--line2)}
+.btn.ghost:hover{background:var(--bg3);color:var(--txt)}
+.btn.ghost:disabled:hover,.btn.secondary:disabled:hover,.btn:disabled:hover{background:inherit;color:inherit}
+.batch-progress{
+  margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:7px;background:var(--bg2);
+}
+.batch-progress[hidden]{display:none}
+.batch-progress .head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  font-size:10px;color:var(--dim2);margin-bottom:8px;
+}
+.batch-progress .head b{color:var(--txt);font-family:var(--pix);font-size:9px;letter-spacing:.4px}
+.batch-progress .track{
+  height:7px;border-radius:999px;background:var(--bg4);overflow:hidden;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);
+}
+.batch-progress .bar{
+  display:block;height:100%;width:0;
+  background:linear-gradient(90deg,var(--sel),var(--accent));
+  transition:width .18s ease;
+}
 .hint{color:var(--dim2);font-size:10px;text-align:center;margin-top:8px;line-height:1.6}
 .vslot{flex:1;min-height:56px;border:1px dashed var(--line2);border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;font-size:11px;color:var(--dim);position:relative;transition:border-color .15s,color .15s;overflow:hidden}
 .vslot:hover{border-color:var(--sel);color:var(--sel)}
 .vslot span{font-size:10px;color:var(--dim2)}
 .vslot.set{border-style:solid;border-color:var(--sel-dim);padding:5px}
 .vslot canvas{display:block;border-radius:4px}
-.vslot .vx{position:absolute;top:3px;right:4px;width:16px;height:16px;line-height:15px;text-align:center;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:12px;cursor:pointer}
+.vslot .vx{position:absolute;top:3px;right:4px;width:16px;height:16px;line-height:15px;text-align:center;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:12px;cursor:pointer;border:0;padding:0;appearance:none}
 
 /* ---------- statusbar ---------- */
 .statusbar{
@@ -224,6 +250,59 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 }
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast b{color:var(--sel)}
+
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0, 0, 0, 0);white-space:nowrap;border:0;
+}
+
+.drop:focus-visible,
+.tbtn:focus-visible,
+.toggle:focus-visible,
+.chk:focus-visible,
+.btn:focus-visible,
+.seg button:focus-visible,
+.vslot:focus-visible,
+.item:focus-visible,
+.num:focus-visible,
+input[type=range]:focus-visible,
+.vslot .vx:focus-visible{
+  outline:2px solid var(--sel);
+  outline-offset:2px;
+}
+
+@media (max-width: 980px){
+  body{align-items:flex-start;padding:12px}
+  .window{max-height:none;height:auto;min-height:calc(100vh - 24px)}
+  .body{flex-direction:column}
+  .panel.left,.panel.right{width:auto;flex:0 0 auto}
+  .panel.left{border-right:0;border-bottom:1px solid var(--line)}
+  .panel.right{border-left:0;border-top:1px solid var(--line)}
+  .viewport{min-height:360px}
+  .list{max-height:220px}
+}
+
+@media (max-width: 720px){
+  body{padding:0}
+  .window{border-radius:0;min-height:100vh;border-left:0;border-right:0}
+  .titlebar{gap:8px;padding:0 10px}
+  .menu,.ver{display:none}
+  .vp-toolbar{right:8px;top:8px}
+  .vp-foot{flex-wrap:wrap;gap:12px;padding:18px 12px 10px}
+  .stat{border:0;margin-right:0;padding-right:0;min-width:calc(50% - 6px)}
+  .ctl{padding:7px 12px 0}
+  .drop{width:calc(100% - 20px);margin:4px 10px 10px}
+  .statusbar{height:auto;flex:0 0 auto;gap:8px;padding:6px 10px;flex-wrap:wrap}
+}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:0.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:0.01ms !important;
+    scroll-behavior:auto !important;
+  }
+}
 </style>
 </head>
 <body>
@@ -241,11 +320,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
     <!-- LEFT: batch -->
     <div class="panel left">
       <div class="sec-h"><span>Batch</span><span class="count" id="batchCount">0 items</span></div>
-      <div class="drop" id="drop">
+      <button type="button" class="drop" id="drop" aria-label="Cargar sprites PNG">
         <span class="ic">⬓</span>
         <b>Suelta PNGs aquí</b>
         <small>o haz clic para elegir · 1 modelo por archivo</small>
-      </div>
+      </button>
       <input type="file" id="file" accept="image/png,image/*" multiple hidden>
       <div class="list" id="list"></div>
     </div>
@@ -258,12 +337,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
         <div id="srcDims" style="color:var(--dim2)">—</div>
       </div>
       <div class="vp-toolbar">
-        <div class="tbtn on" id="btnRotate" title="Auto-rotación">↻</div>
-        <div class="tbtn" id="btnGrid" title="Rejilla">▦</div>
-        <div class="tbtn" id="btnWire" title="Mostrar malla / caras">◇</div>
-        <div class="tbtn" id="btnReset" title="Reiniciar cámara">⊹</div>
+        <button type="button" class="tbtn on" id="btnRotate" title="Auto-rotación" aria-label="Alternar auto-rotación" aria-pressed="true">↻</button>
+        <button type="button" class="tbtn" id="btnGrid" title="Rejilla" aria-label="Alternar rejilla" aria-pressed="false">▦</button>
+        <button type="button" class="tbtn" id="btnWire" title="Mostrar malla / caras" aria-label="Alternar malla alámbrica" aria-pressed="false">◇</button>
+        <button type="button" class="tbtn" id="btnReset" title="Reiniciar cámara" aria-label="Reiniciar cámara">⊹</button>
       </div>
-      <div id="three"></div>
+      <div id="three" aria-label="Vista previa 3D del modelo voxel"></div>
       <div class="vp-foot">
         <div class="stat"><span class="k">Voxels</span><span class="v" id="stVox">—</span></div>
         <div class="stat"><span class="k">Caras (raw)</span><span class="v" id="stRaw">—</span></div>
@@ -315,8 +394,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
           <div class="sec-h"><span>Multi-vista</span><span class="count">opcional</span></div>
           <div class="ctl">
             <div style="display:flex;gap:8px">
-              <div id="slotSide" class="vslot">Perfil<span>+ añadir</span></div>
-              <div id="slotTop" class="vslot">Cenital<span>+ añadir</span></div>
+              <div id="slotSide" class="vslot" role="button" tabindex="0" aria-label="Añadir vista de perfil">Perfil<span>+ añadir</span></div>
+              <div id="slotTop" class="vslot" role="button" tabindex="0" aria-label="Añadir vista cenital">Cenital<span>+ añadir</span></div>
             </div>
             <div class="hint" style="text-align:left;margin-top:6px">Frontal + perfil (+ cenital) → profundidad real por intersección de siluetas (visual hull). Alinea las vistas en altura. Sin vistas extra, se usa el inflado de una vista.</div>
           </div>
@@ -329,6 +408,9 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
           <div class="ctl">
             <div class="row"><span class="lbl">Umbral alpha <span class="flag">--alpha</span></span><span class="val" id="vAlpha">40</span></div>
             <input type="range" id="alpha" min="0" max="255" value="40">
+            <div class="row" style="margin-top:11px"><span class="lbl">Máx. resolución de entrada</span><span class="val" id="vInputCap">96 px</span></div>
+            <input type="range" id="inputCap" min="32" max="256" step="16" value="96">
+            <div class="hint" style="text-align:left">Se aplica al importar nuevas imágenes. Evita bloqueos con sprites grandes, pero puede recortar detalle fino.</div>
             <div class="row" style="margin-top:11px"><span class="lbl">Spritesheet <span class="flag">--sheet</span></span>
               <span style="display:flex;align-items:center;gap:5px">
                 <input class="num" id="sheetC" value="1" type="number" min="1" max="16"> × <input class="num" id="sheetR" value="1" type="number" min="1" max="16">
@@ -336,8 +418,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
             </div>
             <div class="row" id="frameRow" style="display:none"><span class="lbl">Frame</span>
               <span style="display:flex;align-items:center;gap:8px"><span class="val" id="vFrame">1 / 1</span>
-              <span class="tbtn" id="framePrev" style="width:24px;height:24px;font-size:12px">‹</span>
-              <span class="tbtn" id="frameNext" style="width:24px;height:24px;font-size:12px">›</span></span>
+              <button type="button" class="tbtn" id="framePrev" aria-label="Frame anterior" style="width:24px;height:24px;font-size:12px">‹</button>
+              <button type="button" class="tbtn" id="frameNext" aria-label="Frame siguiente" style="width:24px;height:24px;font-size:12px">›</button></span>
             </div>
           </div>
         </div>
@@ -354,9 +436,9 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
         <div class="grp">
           <div class="sec-h"><span>Malla</span></div>
           <div class="ctl">
-            <div class="row"><span class="lbl">Greedy meshing</span><div class="toggle on" id="greedy"></div></div>
+            <div class="row"><span class="lbl">Greedy meshing</span><button type="button" class="toggle on" id="greedy" aria-label="Alternar greedy meshing" aria-pressed="true"></button></div>
             <div class="hint" style="text-align:left">Fusiona caras coplanares del mismo color. <span id="greedyState" style="color:var(--sel)">activado</span>.</div>
-            <div class="row" style="margin-top:11px"><span class="lbl">Oclusión ambiental <span class="flag">--ao</span></span><div class="toggle" id="ao"></div></div>
+            <div class="row" style="margin-top:11px"><span class="lbl">Oclusión ambiental <span class="flag">--ao</span></span><button type="button" class="toggle" id="ao" aria-label="Alternar oclusión ambiental" aria-pressed="false"></button></div>
             <div class="row" id="aoRow" style="margin-top:9px;display:none"><span class="lbl">Intensidad AO</span><span class="val" id="vAoStr">80%</span></div>
             <input type="range" id="aoStr" min="0" max="100" value="80" style="display:none">
             <div class="row" style="margin-top:11px"><span class="lbl">Escala voxel <span class="flag">--scale</span></span><span class="val" id="vScale">1.0</span></div>
@@ -367,12 +449,18 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
         <div class="grp" style="border:0">
           <div class="sec-h"><span>Exportar</span><span class="flag">--formats</span></div>
           <div class="ctl">
-            <label class="chk on" id="fmtVox"><span class="box">✓</span> .vox <span class="fmt-meta">MagicaVoxel · Z-up</span></label>
-            <label class="chk on" id="fmtObj"><span class="box">✓</span> .obj + .mtl <span class="fmt-meta">Unity/Godot · Y-up</span></label>
+            <button type="button" class="chk on" id="fmtVox" aria-pressed="true"><span class="box">✓</span> .vox <span class="fmt-meta">MagicaVoxel · Z-up</span></button>
+            <button type="button" class="chk on" id="fmtObj" aria-pressed="true"><span class="box">✓</span> .obj + .mtl <span class="fmt-meta">Unity/Godot · Y-up</span></button>
           </div>
           <div class="export">
             <button class="btn" id="exportBtn">⬇ Exportar modelo</button>
-            <div class="hint">Z-up para MagicaVoxel · Y-up para engines.<br>Un material por color del sprite.</div>
+            <button class="btn secondary" id="exportBatchBtn">⇣ Exportar batch (.zip)</button>
+            <div class="batch-progress" id="batchProgress" hidden>
+              <div class="head"><b id="batchProgressLabel">Preparando lote…</b><span id="batchProgressCount">0 / 0</span></div>
+              <div class="track" aria-hidden="true"><span class="bar" id="batchProgressBar"></span></div>
+              <button class="btn ghost" id="cancelBatchBtn" type="button" hidden>Cancelar batch</button>
+            </div>
+            <div class="hint">El batch exporta todos los items cargados en un único ZIP y, si hay spritesheet activo, todas sus frames.<br>Z-up para MagicaVoxel · Y-up para engines.</div>
           </div>
         </div>
 
@@ -385,11 +473,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
     <span class="dot"></span><b id="statMain">Listo</b>
     <span class="sp"></span>
     <span id="statDims">—</span>
-    <span>greedy meshing · numpy vectorizado</span>
+    <span>greedy meshing · typed arrays en JavaScript</span>
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <!-- thumbnail for bundler splash -->
 <template id="__bundler_thumbnail">
@@ -400,11 +488,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 </svg>
 </template>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
 <script src="data.js"></script>
 <script src="voxel.js"></script>
 <script src="voxio.js"></script>
+<script src="zip.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
