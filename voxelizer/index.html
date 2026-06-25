@@ -204,6 +204,27 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .btn.ghost{margin-top:8px;background:transparent;color:var(--dim);border:1px solid var(--line2)}
 .btn.ghost:hover{background:var(--bg3);color:var(--txt)}
 .btn.ghost:disabled:hover,.btn.secondary:disabled:hover,.btn:disabled:hover{background:inherit;color:inherit}
+.mini-reset{border:1px solid var(--line2);background:var(--bg2);color:var(--dim);border-radius:999px;padding:5px 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer}
+.mini-reset:hover{background:var(--bg3);color:var(--txt)}
+.mini-reset:disabled{opacity:.55;cursor:not-allowed}
+.adv-panel{margin-top:12px;padding-top:10px;border-top:1px solid var(--line2)}
+.adv-panel summary{cursor:pointer;list-style:none;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);user-select:none}
+.adv-panel summary::-webkit-details-marker{display:none}
+.adv-panel[open] summary{color:var(--txt)}
+.align-grid{display:grid;gap:10px;margin-top:10px}
+.align-card{padding:10px;border:1px solid var(--line2);border-radius:8px;background:var(--bg2)}
+.align-card h4{margin:0 0 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt)}
+.align-actions{display:flex;gap:6px;margin-top:8px}
+.align-actions .mini-reset{flex:1;padding:6px 8px}
+.align-preview{margin-top:10px;border:1px solid var(--line2);border-radius:7px;background:
+  linear-gradient(0deg,rgba(255,255,255,.03) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px),
+  var(--bg3);
+  background-size:12px 12px,12px 12px,auto;
+  padding:8px;
+}
+.align-preview canvas{display:block;width:100%;height:92px;border-radius:4px;background:var(--bg1);image-rendering:pixelated}
+.align-meta{margin-top:6px;font-size:10px;color:var(--dim2);line-height:1.5}
 .batch-progress{
   margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:7px;background:var(--bg2);
 }
@@ -361,32 +382,36 @@ input[type=range]:focus-visible,
           <div class="ctl">
             <div class="row"><span class="lbl">Profundidad <span class="flag">--depth</span></span><span class="val" id="vDepth">6</span></div>
             <input type="range" id="depth" min="1" max="32" value="6">
-            <div class="row" style="margin-top:11px"><span class="lbl">Modo de relieve</span></div>
-            <div class="seg" id="depthModeSeg" style="margin-top:5px">
-              <button data-mode="uniform" class="on">Plano</button>
-              <button data-mode="dt">DT</button>
-              <button data-mode="poisson">Poisson</button>
-              <button data-mode="sfs">SFS</button>
-              <button data-mode="combo">Combo</button>
-              <button data-mode="humanoid">Humano</button>
-            </div>
-            <div class="row" id="reliefRow" style="margin-top:11px;display:none"><span class="lbl">Relieve <span class="flag">--relief</span></span><span class="val" id="vRelief">100%</span></div>
-            <input type="range" id="relief" min="0" max="100" value="100" style="display:none">
-            <div class="row" id="paramRow" style="margin-top:11px;display:none"><span class="lbl" id="paramLbl">Parámetro</span><span class="val" id="vParam">—</span></div>
-            <input type="range" id="modeParam" min="0" max="100" value="100" style="display:none">
-            <div id="humPanel" style="display:none">
-              <div class="row" style="margin-top:11px"><span class="lbl">Profundidad torso</span><span class="val" id="vHumTorso">60%</span></div>
-              <input type="range" id="humTorso" min="30" max="100" value="60">
-              <div class="row" style="margin-top:9px"><span class="lbl">Redondez miembros</span><span class="val" id="vHumRound">100%</span></div>
-              <input type="range" id="humRound" min="0" max="100" value="100">
-              <div class="row" style="margin-top:9px"><span class="lbl">Fuerza del prior</span><span class="val" id="vHumPrior">40%</span></div>
-              <input type="range" id="humPrior" min="0" max="100" value="40">
-              <div class="row" style="margin-top:9px"><span class="lbl">Proporción cabeza</span><span class="val" id="vHumHead">25%</span></div>
-              <input type="range" id="humHead" min="12" max="35" value="25">
-              <div class="row" style="margin-top:9px"><span class="lbl">Suavizado</span><span class="val" id="vHumSmooth">30%</span></div>
-              <input type="range" id="humSmooth" min="0" max="100" value="30">
-            </div>
-            <div class="hint" id="modeHint" style="text-align:left;margin-top:6px">Plano: extrusión uniforme, grosor constante.</div>
+            <details class="adv-panel" id="advancedReconstruction">
+              <summary>Reconstrucción avanzada</summary>
+              <div class="row" style="margin-top:11px"><span class="lbl">Modo de relieve</span><button type="button" class="mini-reset" id="resetDepthProfile">Restablecer</button></div>
+              <div class="seg" id="depthModeSeg" style="margin-top:5px">
+                <button data-mode="uniform" class="on">Plano</button>
+                <button data-mode="dt">DT</button>
+                <button data-mode="poisson">Poisson</button>
+                <button data-mode="sfs">SFS</button>
+                <button data-mode="combo">Combo</button>
+                <button data-mode="humanoid">Humano</button>
+              </div>
+              <div class="row" id="reliefRow" style="margin-top:11px;display:none"><span class="lbl">Relieve <span class="flag">--relief</span></span><span class="val" id="vRelief">100%</span></div>
+              <input type="range" id="relief" min="0" max="100" value="100" style="display:none">
+              <div class="row" id="paramRow" style="margin-top:11px;display:none"><span class="lbl" id="paramLbl">Parámetro</span><span class="val" id="vParam">—</span></div>
+              <input type="range" id="modeParam" min="0" max="100" value="100" style="display:none">
+              <div id="humPanel" style="display:none">
+                <div class="row" style="margin-top:11px"><span class="lbl">Preset humanoide</span><button type="button" class="mini-reset" id="resetHumanoid">Restablecer</button></div>
+                <div class="row" style="margin-top:11px"><span class="lbl">Profundidad torso</span><span class="val" id="vHumTorso">60%</span></div>
+                <input type="range" id="humTorso" min="30" max="100" value="60">
+                <div class="row" style="margin-top:9px"><span class="lbl">Redondez miembros</span><span class="val" id="vHumRound">100%</span></div>
+                <input type="range" id="humRound" min="0" max="100" value="100">
+                <div class="row" style="margin-top:9px"><span class="lbl">Fuerza del prior</span><span class="val" id="vHumPrior">40%</span></div>
+                <input type="range" id="humPrior" min="0" max="100" value="40">
+                <div class="row" style="margin-top:9px"><span class="lbl">Proporción cabeza</span><span class="val" id="vHumHead">25%</span></div>
+                <input type="range" id="humHead" min="12" max="35" value="25">
+                <div class="row" style="margin-top:9px"><span class="lbl">Suavizado</span><span class="val" id="vHumSmooth">30%</span></div>
+                <input type="range" id="humSmooth" min="0" max="100" value="30">
+              </div>
+              <div class="hint" id="modeHint" style="text-align:left;margin-top:6px">Plano: extrusión uniforme, grosor constante.</div>
+            </details>
           </div>
         </div>
 
@@ -398,6 +423,53 @@ input[type=range]:focus-visible,
               <div id="slotTop" class="vslot" role="button" tabindex="0" aria-label="Añadir vista cenital">Cenital<span>+ añadir</span></div>
             </div>
             <div class="hint" style="text-align:left;margin-top:6px">Frontal + perfil (+ cenital) → profundidad real por intersección de siluetas (visual hull). Alinea las vistas en altura. Sin vistas extra, se usa el inflado de una vista.</div>
+            <details class="adv-panel" id="advancedAlignment">
+              <summary>Alineación de vistas</summary>
+              <div class="align-grid">
+                <section class="align-card">
+                  <h4>Perfil</h4>
+                  <div class="row"><span class="lbl">Autoajuste por caja</span><button type="button" class="toggle" id="sideAutoFit" aria-label="Activar autoajuste de perfil" aria-pressed="false"></button></div>
+                  <div class="row"><span class="lbl">Espejo X</span><button type="button" class="toggle" id="sideFlipX" aria-label="Espejar perfil en X" aria-pressed="false"></button></div>
+                  <div class="row"><span class="lbl">Offset X</span><span class="val" id="vSideOffsetX">0</span></div>
+                  <input type="range" id="sideOffsetX" min="-32" max="32" value="0">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Offset Y</span><span class="val" id="vSideOffsetY">0</span></div>
+                  <input type="range" id="sideOffsetY" min="-32" max="32" value="0">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Escala</span><span class="val" id="vSideScale">100%</span></div>
+                  <input type="range" id="sideScale" min="50" max="200" value="100">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Rotación</span><span class="val" id="vSideRotation">0°</span></div>
+                  <input type="range" id="sideRotation" min="-180" max="180" value="0">
+                  <div class="align-actions">
+                    <button type="button" class="mini-reset" id="sideCenter">Centrar</button>
+                    <button type="button" class="mini-reset" id="sideReset">Restablecer</button>
+                  </div>
+                  <div class="align-preview">
+                    <canvas id="sideAlignPreview" width="96" height="96"></canvas>
+                    <div class="align-meta" id="sideAlignMeta">Sin vista de perfil cargada.</div>
+                  </div>
+                </section>
+                <section class="align-card">
+                  <h4>Cenital</h4>
+                  <div class="row"><span class="lbl">Autoajuste por caja</span><button type="button" class="toggle" id="topAutoFit" aria-label="Activar autoajuste cenital" aria-pressed="false"></button></div>
+                  <div class="row"><span class="lbl">Espejo X</span><button type="button" class="toggle" id="topFlipX" aria-label="Espejar cenital en X" aria-pressed="false"></button></div>
+                  <div class="row"><span class="lbl">Offset X</span><span class="val" id="vTopOffsetX">0</span></div>
+                  <input type="range" id="topOffsetX" min="-32" max="32" value="0">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Offset Y</span><span class="val" id="vTopOffsetY">0</span></div>
+                  <input type="range" id="topOffsetY" min="-32" max="32" value="0">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Escala</span><span class="val" id="vTopScale">100%</span></div>
+                  <input type="range" id="topScale" min="50" max="200" value="100">
+                  <div class="row" style="margin-top:9px"><span class="lbl">Rotación</span><span class="val" id="vTopRotation">0°</span></div>
+                  <input type="range" id="topRotation" min="-180" max="180" value="0">
+                  <div class="align-actions">
+                    <button type="button" class="mini-reset" id="topCenter">Centrar</button>
+                    <button type="button" class="mini-reset" id="topReset">Restablecer</button>
+                  </div>
+                  <div class="align-preview">
+                    <canvas id="topAlignPreview" width="96" height="96"></canvas>
+                    <div class="align-meta" id="topAlignMeta">Sin vista cenital cargada.</div>
+                  </div>
+                </section>
+              </div>
+            </details>
           </div>
         </div>
         <input type="file" id="fileSide" accept="image/*" style="display:none">
@@ -434,7 +506,7 @@ input[type=range]:focus-visible,
         </div>
 
         <div class="grp">
-          <div class="sec-h"><span>Malla</span></div>
+          <div class="sec-h"><span>Malla</span><button type="button" class="mini-reset" id="resetMesh">Restablecer</button></div>
           <div class="ctl">
             <div class="row"><span class="lbl">Greedy meshing</span><button type="button" class="toggle on" id="greedy" aria-label="Alternar greedy meshing" aria-pressed="true"></button></div>
             <div class="hint" style="text-align:left">Fusiona caras coplanares del mismo color. <span id="greedyState" style="color:var(--sel)">activado</span>.</div>

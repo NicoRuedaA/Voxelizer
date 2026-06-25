@@ -4,14 +4,27 @@
   'use strict';
 
   // ---------- state ----------
+  const cloneData = value => {
+    if (typeof structuredClone === 'function') return structuredClone(value);
+    return JSON.parse(JSON.stringify(value));
+  };
+  const defaultConfig = Voxel.createDefaultConfig ? Voxel.createDefaultConfig() : null;
+  const defaultAlignment = defaultConfig ? cloneData(defaultConfig.alignment) : {
+    autoFit: false,
+    side: { offsetX: 0, offsetY: 0, scale: 1, rotation: 0, flipX: false, autoFit: false },
+    top: { offsetX: 0, offsetY: 0, scale: 1, rotation: 0, flipX: false, autoFit: false },
+  };
+  const defaultOpts = Voxel.defaultLegacyOptions ? Voxel.defaultLegacyOptions() : {
+    depth: 6, alpha: 40, colors: 32, greedy: true, depthMode: 'uniform', relief: 1.0, scale: 1.0,
+    inputCap: 96,
+    dtRound: 1.0, poissonTension: 0.0, sfsGamma: 1.0, comboMix: 0.5, ao: false, aoStrength: 0.8,
+    humTorso: 0.6, humRound: 1.0, humPrior: 0.4, humHead: 0.25, humSmooth: 0.3
+  };
   const state = {
     pixels: null,        // current {w,h,data} (single frame, after sheet slice)
     sourceCanvas: null,  // full source canvas (pre-slice)
     name: '—',
-    opts: { depth: 6, alpha: 40, colors: 32, greedy: true, depthMode: 'uniform', relief: 1.0, scale: 1.0,
-            inputCap: 96,
-            dtRound: 1.0, poissonTension: 0.0, sfsGamma: 1.0, comboMix: 0.5, ao: false, aoStrength: 0.8,
-            humTorso: 0.6, humRound: 1.0, humPrior: 0.4, humHead: 0.25, humSmooth: 0.3 },
+    opts: { ...defaultOpts, alignment: cloneData(defaultAlignment) },
     sheet: { c: 1, r: 1, frame: 0 },
     views: { side: null, top: null },   // canvases opcionales para la vista actual
     showWire: false, showGrid: false, autoRotate: true,
@@ -70,6 +83,30 @@
   function shade(n) {
     const d = Math.max(0, n[0] * L.x + n[1] * L.y + n[2] * L.z);
     return 0.42 + 0.58 * d;
+  }
+  function cloneOpts(opts = state.opts) {
+    return cloneData(opts);
+  }
+  function activeRecord() {
+    return items.find(it => it.canvas === state.sourceCanvas) || null;
+  }
+  function ensureAlignmentState() {
+    if (!state.opts.alignment) state.opts.alignment = cloneData(defaultAlignment);
+    if (!state.opts.alignment.side) state.opts.alignment.side = cloneData(defaultAlignment.side);
+    if (!state.opts.alignment.top) state.opts.alignment.top = cloneData(defaultAlignment.top);
+    return state.opts.alignment;
+  }
+  function ensureRecordAlignment(rec) {
+    if (!rec) return cloneData(defaultAlignment);
+    if (!rec.alignment) rec.alignment = cloneData(defaultAlignment);
+    if (!rec.alignment.side) rec.alignment.side = cloneData(defaultAlignment.side);
+    if (!rec.alignment.top) rec.alignment.top = cloneData(defaultAlignment.top);
+    if (typeof rec.alignment.autoFit !== 'boolean') rec.alignment.autoFit = false;
+    return rec.alignment;
+  }
+  function alignRef(kind) {
+    const alignment = ensureAlignmentState();
+    return alignment[kind];
   }
 
   // ---------- build geometry from faces ----------
@@ -258,11 +295,12 @@
     refreshActionState();
     $('statMain').textContent = 'Voxelizando…';
     try {
-      const result = await voxelizePreview(pixels, { ...state.opts }, views);
+      const result = await voxelizePreview(pixels, cloneOpts(), views);
       if (seq !== renderSeq) return;
       const ms = (performance.now() - t0);
       state.last = result;
       buildModel(result);
+      updateAlignmentViews();
       updateReadouts(result, ms);
     } catch (error) {
       if (error.message === 'stale') return;
@@ -348,7 +386,7 @@
     meta.appendChild(nm); meta.appendChild(sub);
     const st = document.createElement('span');
     el.appendChild(meta); el.appendChild(st);
-    const rec = { name, canvas, el, st };
+    const rec = { name, canvas, el, st, alignment: cloneData(defaultAlignment) };
     setItemStatus(rec, status);
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
@@ -370,11 +408,13 @@
     state.sourceCanvas = rec.canvas;
     state.name = rec.name;
     state.sheet.frame = 0;
+    state.opts.alignment = ensureRecordAlignment(rec);
     state.views = { side: rec.side || null, top: rec.top || null };
     fillSlot('side', state.views.side);
     fillSlot('top', state.views.top);
     $('srcName').textContent = rec.name;
     state.last = null;
+    updateAlignmentViews();
     setItemStatus(rec, 'done');
     updateFrameUI();
     refreshActionState();
@@ -407,10 +447,13 @@
     }
   }
   function setView(kind, canvas) {
-    const rec = items.find(it => it.canvas === state.sourceCanvas);
+    const rec = activeRecord();
     if (rec) rec[kind] = canvas;
+    if (rec) state.opts.alignment = ensureRecordAlignment(rec);
     state.views[kind] = canvas;
     fillSlot(kind, canvas);
+    state.last = null;
+    updateAlignmentViews();
     recompute();
   }
 
@@ -518,7 +561,9 @@
   async function buildResultForItem(rec, frame, opts, sheet) {
     const pixels = sliceFrameFromCanvas(rec.canvas, sheet, frame);
     if (!pixels) throw new Error(`No se pudo leer ${rec.name}`);
-    return spawnVoxelTask(pixels, opts, getItemViews(rec));
+    const itemOpts = cloneOpts(opts);
+    itemOpts.alignment = cloneData(ensureRecordAlignment(rec));
+    return spawnVoxelTask(pixels, itemOpts, getItemViews(rec));
   }
 
   function cancelBatchExport() {
@@ -539,7 +584,7 @@
       throw new Error('No se pudo inicializar el empaquetado ZIP');
     }
     cancelPreviewJob('stale');
-    const batchOpts = { ...state.opts };
+    const batchOpts = cloneOpts();
     const batchSheet = { ...state.sheet };
     const totalFrames = frameCount(batchSheet);
     const totalJobs = items.length * totalFrames;
@@ -626,6 +671,111 @@
   }
 
   // ================= WIRE UP CONTROLS =================
+  function setDisabled(ids, disabled) {
+    ids.forEach(id => {
+      const el = $(id);
+      if (el) el.disabled = disabled;
+    });
+  }
+  function syncRange(id, value, valId, fmt) {
+    const el = $(id);
+    if (!el) return;
+    el.value = value;
+    if (valId) $(valId).textContent = fmt ? fmt(value) : value;
+  }
+  function syncToggle(id, on) {
+    setPressed($(id), on);
+  }
+  function syncMeshControls() {
+    syncToggle('greedy', state.opts.greedy);
+    $('greedyState').textContent = state.opts.greedy ? 'activado' : 'desactivado';
+    $('greedyState').style.color = state.opts.greedy ? 'var(--sel)' : 'var(--dim)';
+    syncToggle('ao', state.opts.ao);
+    $('aoRow').style.display = state.opts.ao ? '' : 'none';
+    $('aoStr').style.display = state.opts.ao ? '' : 'none';
+    $('aoStr').disabled = !state.opts.ao;
+    syncRange('aoStr', Math.round(state.opts.aoStrength * 100), 'vAoStr', v => v + '%');
+    syncRange('scale', Math.round(state.opts.scale * 10), 'vScale', v => (v / 10).toFixed(1));
+  }
+  function syncHumanoidControls() {
+    syncRange('humTorso', Math.round(state.opts.humTorso * 100), 'vHumTorso', v => v + '%');
+    syncRange('humRound', Math.round(state.opts.humRound * 100), 'vHumRound', v => v + '%');
+    syncRange('humPrior', Math.round(state.opts.humPrior * 100), 'vHumPrior', v => v + '%');
+    syncRange('humHead', Math.round(state.opts.humHead * 100), 'vHumHead', v => v + '%');
+    syncRange('humSmooth', Math.round(state.opts.humSmooth * 100), 'vHumSmooth', v => v + '%');
+  }
+  function clearAlignmentPreview(kind, message) {
+    const canvas = $(kind + 'AlignPreview');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#151821';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+    $(kind + 'AlignMeta').textContent = message;
+  }
+  function drawAlignmentPreview(kind) {
+    const debug = state.last && state.last.debug && state.last.debug.silhouettes ? state.last.debug.silhouettes[kind] : null;
+    const label = kind === 'side' ? 'perfil' : 'cenital';
+    if (!state.views[kind]) {
+      clearAlignmentPreview(kind, `Sin vista ${label} cargada.`);
+      return;
+    }
+    if (!debug || !debug.mask) {
+      clearAlignmentPreview(kind, `Esperando previsualización alineada de ${label}.`);
+      return;
+    }
+    const canvas = $(kind + 'AlignPreview');
+    const ctx = canvas.getContext('2d');
+    canvas.width = debug.w;
+    canvas.height = debug.h;
+    ctx.clearRect(0, 0, debug.w, debug.h);
+    ctx.fillStyle = '#11141c';
+    ctx.fillRect(0, 0, debug.w, debug.h);
+    for (let y = 0; y < debug.h; y++) {
+      for (let x = 0; x < debug.w; x++) {
+        if (!debug.mask[x + debug.w * y]) continue;
+        ctx.fillStyle = '#6de2e1';
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    if (debug.bounds) {
+      ctx.strokeStyle = '#ff9b54';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(debug.bounds.minX + 0.5, debug.bounds.minY + 0.5, debug.bounds.width, debug.bounds.height);
+    }
+    const b = debug.bounds;
+    const summary = b
+      ? `BBox ${b.width}x${b.height} · off ${debug.transform.offsetX}/${debug.transform.offsetY} · escala ${debug.transform.scale.toFixed(2)} · rot ${debug.transform.rotation}°`
+      : 'Sin silueta útil tras la transformación.';
+    $(kind + 'AlignMeta').textContent = summary;
+  }
+  function syncAlignmentControls(kind) {
+    const hasView = !!state.views[kind];
+    const align = alignRef(kind);
+    const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
+    syncToggle(kind + 'AutoFit', !!align.autoFit);
+    syncToggle(kind + 'FlipX', !!align.flipX);
+    syncRange(kind + 'OffsetX', Math.round(align.offsetX), 'v' + cap + 'OffsetX', v => (v > 0 ? '+' : '') + v);
+    syncRange(kind + 'OffsetY', Math.round(align.offsetY), 'v' + cap + 'OffsetY', v => (v > 0 ? '+' : '') + v);
+    syncRange(kind + 'Scale', Math.round(align.scale * 100), 'v' + cap + 'Scale', v => v + '%');
+    syncRange(kind + 'Rotation', Math.round(align.rotation), 'v' + cap + 'Rotation', v => v + '°');
+    setDisabled([
+      kind + 'AutoFit',
+      kind + 'FlipX',
+      kind + 'OffsetX',
+      kind + 'OffsetY',
+      kind + 'Scale',
+      kind + 'Rotation',
+      kind + 'Center',
+      kind + 'Reset',
+    ], !hasView);
+    drawAlignmentPreview(kind);
+  }
+  function updateAlignmentViews() {
+    syncAlignmentControls('side');
+    syncAlignmentControls('top');
+  }
   function slider(id, valId, fn, fmt, trigger = true) {
     const el = $(id);
     el.addEventListener('input', () => {
@@ -658,6 +808,7 @@
     state.opts.ao = on;
     $('aoRow').style.display = on ? '' : 'none';
     $('aoStr').style.display = on ? '' : 'none';
+    $('aoStr').disabled = !on;
   });
   slider('aoStr', 'vAoStr', v => state.opts.aoStrength = v / 100, v => v + '%');
 
@@ -677,13 +828,15 @@
     sfs:     { label: 'Contraste',       min: 50, max: 250, def: 100, set: v => state.opts.sfsGamma = v / 100,       fmt: v => (v / 100).toFixed(2) },
     combo:   { label: 'Mezcla DT↔luz',   min: 0,  max: 100, def: 50,  set: v => state.opts.comboMix = v / 100,       fmt: v => v + '%' },
   };
-  function setMode(mode) {
+  function setMode(mode, trigger = true) {
     state.opts.depthMode = mode;
     [...$('depthModeSeg').children].forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
     const show = mode !== 'uniform';
     $('reliefRow').style.display = show ? '' : 'none';
     $('relief').style.display = show ? '' : 'none';
     $('humPanel').style.display = mode === 'humanoid' ? '' : 'none';
+    $('relief').disabled = !show;
+    setDisabled(['humTorso', 'humRound', 'humPrior', 'humHead', 'humSmooth'], mode !== 'humanoid');
     $('modeHint').textContent = MODE_HINT[mode] || '';
     const cfg = PARAM[mode];
     if (cfg) {
@@ -691,10 +844,14 @@
       s.min = cfg.min; s.max = cfg.max; s.value = cfg.def; cfg.set(cfg.def);
       $('paramLbl').textContent = cfg.label; $('vParam').textContent = cfg.fmt(cfg.def);
       $('paramRow').style.display = ''; s.style.display = '';
+      s.disabled = false;
     } else {
       $('paramRow').style.display = 'none'; $('modeParam').style.display = 'none';
+      $('vParam').textContent = '—';
+      $('modeParam').disabled = true;
     }
-    recompute();
+    if (!cfg) $('paramLbl').textContent = 'Parámetro';
+    if (trigger) recompute();
   }
   [...$('depthModeSeg').children].forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
   slider('relief', 'vRelief', v => state.opts.relief = v / 100, v => v + '%');
@@ -708,6 +865,78 @@
   slider('humPrior', 'vHumPrior', v => state.opts.humPrior = v / 100, v => v + '%');
   slider('humHead', 'vHumHead', v => state.opts.humHead = v / 100, v => v + '%');
   slider('humSmooth', 'vHumSmooth', v => state.opts.humSmooth = v / 100, v => v + '%');
+  $('resetDepthProfile').addEventListener('click', () => {
+    state.opts.depthMode = defaultOpts.depthMode;
+    state.opts.relief = defaultOpts.relief;
+    state.opts.dtRound = defaultOpts.dtRound;
+    state.opts.poissonTension = defaultOpts.poissonTension;
+    state.opts.sfsGamma = defaultOpts.sfsGamma;
+    state.opts.comboMix = defaultOpts.comboMix;
+    syncRange('relief', Math.round(state.opts.relief * 100), 'vRelief', v => v + '%');
+    setMode(state.opts.depthMode);
+  });
+  $('resetHumanoid').addEventListener('click', () => {
+    state.opts.humTorso = defaultOpts.humTorso;
+    state.opts.humRound = defaultOpts.humRound;
+    state.opts.humPrior = defaultOpts.humPrior;
+    state.opts.humHead = defaultOpts.humHead;
+    state.opts.humSmooth = defaultOpts.humSmooth;
+    syncHumanoidControls();
+    if (state.opts.depthMode === 'humanoid') recompute();
+  });
+  $('resetMesh').addEventListener('click', () => {
+    state.opts.greedy = defaultOpts.greedy;
+    state.opts.ao = defaultOpts.ao;
+    state.opts.aoStrength = defaultOpts.aoStrength;
+    state.opts.scale = defaultOpts.scale;
+    syncMeshControls();
+    recompute();
+  });
+  [['side', 'Side'], ['top', 'Top']].forEach(([kind, cap]) => {
+    toggle(kind + 'AutoFit', on => {
+      const align = alignRef(kind);
+      align.autoFit = on;
+      if (on) {
+        align.offsetX = 0;
+        align.offsetY = 0;
+        align.scale = 1;
+        align.rotation = 0;
+      }
+      syncAlignmentControls(kind);
+    });
+    toggle(kind + 'FlipX', on => {
+      alignRef(kind).flipX = on;
+      syncAlignmentControls(kind);
+    });
+    slider(kind + 'OffsetX', 'v' + cap + 'OffsetX', v => {
+      alignRef(kind).offsetX = v;
+      syncAlignmentControls(kind);
+    }, v => (v > 0 ? '+' : '') + v);
+    slider(kind + 'OffsetY', 'v' + cap + 'OffsetY', v => {
+      alignRef(kind).offsetY = v;
+      syncAlignmentControls(kind);
+    }, v => (v > 0 ? '+' : '') + v);
+    slider(kind + 'Scale', 'v' + cap + 'Scale', v => {
+      alignRef(kind).scale = v / 100;
+      syncAlignmentControls(kind);
+    }, v => v + '%');
+    slider(kind + 'Rotation', 'v' + cap + 'Rotation', v => {
+      alignRef(kind).rotation = v;
+      syncAlignmentControls(kind);
+    }, v => v + '°');
+    $(kind + 'Center').addEventListener('click', () => {
+      const align = alignRef(kind);
+      align.offsetX = 0;
+      align.offsetY = 0;
+      syncAlignmentControls(kind);
+      recompute();
+    });
+    $(kind + 'Reset').addEventListener('click', () => {
+      state.opts.alignment[kind] = cloneData(defaultAlignment[kind]);
+      syncAlignmentControls(kind);
+      recompute();
+    });
+  });
 
   // sheet inputs
   function sheetChange() {
@@ -800,6 +1029,10 @@
   if (typeof THREE === 'undefined') {
     document.getElementById('statMain').textContent = 'Error: Three.js no cargó';
   } else {
+    syncHumanoidControls();
+    syncMeshControls();
+    updateAlignmentViews();
+    setMode(state.opts.depthMode, false);
     boot();
   }
 })();
