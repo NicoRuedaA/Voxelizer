@@ -1,163 +1,142 @@
 # Voxelizer
 
-Prototipo web para convertir sprites 2D en modelos voxel 3D exportables.
+Web prototype that turns one front sprite—and optional orthographic views—into a deterministic voxel model exportable as `.vox` or `.obj + .mtl`.
 
-`Voxelizer` toma una imagen frontal, la cuantiza a una paleta reducida, genera una grilla de vóxeles y construye una malla optimizada con `greedy meshing`. Además, puede usar vistas auxiliares de perfil y cenital para reconstruir profundidad real mediante `visual hull`, y exporta el resultado a `.vox` y `.obj + .mtl`.
+## Quick path
 
-## Qué hace
+1. Serve `voxelizer/` with any static HTTP server.
+2. Load a PNG and choose a depth prior.
+3. Optionally add side, top, or depth-map images.
+4. Review projection diagnostics before exporting.
 
-- Convierte sprites o PNGs a una representación voxel 3D.
-- Soporta extrusión uniforme o perfiles de relieve derivados del sprite.
-- Acepta vistas `side` y `top` para mejorar la profundidad del volumen.
-- Reduce caras con `greedy meshing`.
-- Exporta a:
-  - `.vox` para MagicaVoxel
-  - `.obj + .mtl` para engines y DCC tools
-- Incluye una suite mínima de regresión para los bugs críticos ya corregidos.
-
-## Estado del proyecto
-
-Esto es un prototipo funcional, no una aplicación cerrada de producción.
-
-Hoy ya cubre bien el núcleo de voxelización y exportación, pero todavía tiene deuda en:
-
-- accesibilidad
-- responsive
-- sanitización de algunos fragmentos HTML en la UI
-- documentación técnica más profunda
-
-## Stack
-
-- HTML, CSS y JavaScript vanilla
-- Three.js `r128` para visualización
-- `node:test` para pruebas de regresión
-- GitHub CLI (`gh`) para publicación del repo
-
-No hay bundler, framework ni paso de build.
-
-## Estructura
-
-```text
-Voxelizer_app/
-|-- README.md
-|-- .gitignore
-|-- tests/
-|   `-- voxelizer.test.js
-`-- voxelizer/
-    |-- index.html
-    |-- app.js
-    |-- voxel.js
-    |-- voxio.js
-    `-- data.js
+```bash
+python3 -m http.server 8000 --directory voxelizer
+# open http://localhost:8000
 ```
 
-## Arquitectura rápida
+Opening `index.html` directly also works in browsers that allow local workers; otherwise the app falls back to the main thread.
 
-### `voxelizer/index.html`
+## Reconstruction modes
 
-Contiene la UI del prototipo y carga los scripts en orden.
+### One sprite
 
-### `voxelizer/app.js`
+The front silhouette is extruded with one of six deterministic profiles:
 
-Orquesta estado, interacción de usuario, carga de imágenes, render 3D con Three.js y flujo de exportación.
+| Profile | Prior |
+|---|---|
+| Uniform | Constant thickness |
+| DT | Legacy contour-distance inflation; optional local-width modulation |
+| Poisson | Smooth screened inflation |
+| SFS | Artist-painted luminance |
+| Combo | DT shape modulated by luminance |
+| Humanoid | Head, torso, and limb cross-section heuristic |
 
-### `voxelizer/voxel.js`
+The Z envelope can be symmetric, asymmetric (`frontRatio`), or driven by a supplied grayscale depth map. `frontRatio=0` places a partial span toward back/`-Z`, `0.5` centers it, and `1` places it toward documented front/`+Z`. Local-width modulation is an explicit v2 opt-in so migrated v1 DT/Poisson/SFS/Combo grids remain unchanged. A single image does **not** reveal hidden geometry: these modes are artistic priors, not physical reconstruction.
 
-Es el core del proyecto. Ahí viven:
+### Multiple views
 
-- lectura de píxeles
-- cuantización de paleta
-- perfiles de relieve
-- generación de grilla voxel
-- `visual hull`
-- extracción de caras naive y greedy
-- anotación de AO
+Supported calibrated orthographic roles are:
 
-### `voxelizer/voxio.js`
+| Role | Image plane | Shared axes |
+|---|---|---|
+| Front | X/Y | Width and height |
+| Side | Z/Y | Depth and height |
+| Top | X/Z | Width and depth |
 
-Encapsula la exportación:
+`strict` requires every supplied silhouette to accept a voxel. `weighted` combines the front, side, and top confidences with configurable weights, threshold, boundary-distance tolerance, and an optional hard front constraint.
 
-- `exportVox(result)` para MagicaVoxel
-- `exportOBJ(result, opts)` para `.obj + .mtl`
+The UI reports per-view projected IoU and residuals. Empty masks, contradictory inputs, low overlap, missing depth maps, and unsupported roles produce structured warnings rather than failing silently.
 
-### `tests/voxelizer.test.js`
+## Input contract
 
-Suite de regresión enfocada en los bugs importantes corregidos.
+Legacy `side` and `top` payloads remain supported:
 
-## Cómo ejecutarlo
-
-La forma más simple es abrir directamente:
-
-```text
-voxelizer/index.html
+```js
+Voxel.voxelize(frontPixels, config, { side: sidePixels, top: topPixels });
 ```
 
-en el navegador.
+The serializable contract supports confidence, transform, landmarks, and animation frames:
 
-Si preferís servirlo como sitio estático, podés usar cualquier servidor HTTP simple. Por ejemplo:
-
-```powershell
-npx serve voxelizer
+```js
+const views = {
+  frame: 1,
+  views: [
+    {
+      id: 'profile',
+      role: 'side',
+      confidence: 0.8,
+      orientation: { projection: 'orthographic', horizontal: '+Z', vertical: '-Y' },
+      transform: { offsetX: 0, offsetY: 0, scale: 1, rotation: 0, flipX: false },
+      frames: [sideFrame0, sideFrame1],
+    },
+    { role: 'depthmap', pixels: depthPixels },
+  ],
+};
 ```
 
-## Flujo de uso
+Explicit orientation metadata is validated against the canonical tuples above. Perspective, arbitrary-angle, unsupported-role, and mismatched-axis descriptors are ignored with structured diagnostics: accepting metadata while silently using another projector would invent geometry.
 
-1. Cargá uno o más PNGs desde el panel izquierdo.
-2. Ajustá profundidad, alpha, paleta y modo de relieve.
-3. Opcionalmente añadí vistas de perfil y/o cenital.
-4. Revisá el modelo en el viewport.
-5. Exportá a `.vox` o `.obj + .mtl`.
+## Silhouette and color pipeline
+
+- Alpha semantics are uniform: a pixel is foreground only when `alpha > alphaThreshold`.
+- Pixel payloads must provide positive integer `w`/`h` and exactly `w*h*4` values.
+- Pixel-art-safe defaults keep cleanup disabled and use nearest-neighbor resampling.
+- Optional denoise, morphological closing, alpha/spatial feathering, area, and bilinear resampling are available.
+- `color.mode="front"` keeps explicit policies: `color.side` accepts `front`, `darken`, or calibrated `auxiliary`; `color.back` accepts `front` or `darken` because no rear camera role exists.
+- `color.mode="auxiliary"` is a side/top fusion preset: it overrides the side policy only when at least one usable auxiliary color source exists; `color.back` always remains explicit. With no usable auxiliary source, front/back behavior and colors remain unchanged.
+- Auxiliary color fusion assigns calibrated side/top RGB to the corresponding exposed face materials. Front and back policies remain independent. Preview and OBJ/MTL preserve those face-specific colors.
+
+Auxiliary views are static by default. The UI exposes an explicit “follows spritesheet” flag per view; no canvas-size inference is used. The core contract also accepts an explicit `frames[]` array and selected `frame`.
+
+## Exports and performance
+
+- Greedy voxel meshing remains the only supported mesh contract.
+- Smooth mesh controls were removed because Marching Cubes would require a different normal, color, renderer, and OBJ contract; exposing inert settings was worse than an explicit limitation.
+- Idle workers are reused. Pending preview work is generation-cancelled without disposing idle workers; batch cancellation disposes its worker. Jobs are cloned once into canonical immutable snapshots used by both dispatch and fallback. Unknown job IDs, invalid result envelopes, dispatch failures, and runtime failures settle every pending job owned by that worker incarnation through rejection or `WORKER_FALLBACK`; later stale events are ignored.
+- Metrics include typed buffers, diagnostics, and estimated face memory.
+- VOX cannot encode a different material per face. Its explicit lossy policy stores the mean of each voxel's exposed face colors, then remaps used RGB colors to indices `1..255`. More than 255 distinct used colors is rejected instead of corrupted.
+- Front input is limited to 4,194,304 pixels, the grid to 16,777,216 cells, auxiliary views to bounded count/cumulative bytes, morphology to per-view and aggregate work estimates, occupied meshing to 2,097,152 voxels, and face objects to exposed-face/byte budgets before allocation.
+- Batch manifests account for input bytes before each clone, snapshot each source/static view once, slice frames lazily, return defensive per-job copies, assign deterministic unique archive basenames, and reject excessive jobs or expected/actual output bytes.
+
+Current hard caps are 8 auxiliary views, 8,388,608 cumulative auxiliary pixels/32 MiB RGBA, 128 Mi operations of aggregate morphology, 250,000 exposed unit faces/64 MiB estimated face objects, 256 batch jobs, 128 MiB batch input snapshots, and 128 MiB expected or actual batch output.
+
+## Architecture
+
+| File | Responsibility |
+|---|---|
+| `voxelizer/voxel.js` | Validation, preprocessing, depth priors, view calibration, occupancy, diagnostics, color fusion, and meshing |
+| `voxelizer/app.js` | UI state, spritesheet slicing, worker lifecycle, preview, batch, and exports |
+| `voxelizer/worker.js` | Transferable worker protocol |
+| `voxelizer/worker-channel.js` | Recoverable worker lifecycle, cancellation, fallback, and retry |
+| `voxelizer/transfer.js` | Shared clone/transferable traversal |
+| `voxelizer/batch.js` | Immutable lazy batch manifests, progress, names, and memory budgets |
+| `voxelizer/voxio.js` | VOX and OBJ/MTL serialization |
+| `tests/voxelizer.test.js` | Deterministic grids, edge cases, contracts, exports, and performance sanity |
 
 ## Tests
 
-Los tests actuales validan regresiones del core:
-
-- `alpha=0` no debe voxelizar píxeles transparentes
-- la cuantización no debe borrar vóxeles al reducir colores
-- el `visual hull` debe respetar la profundidad pedida
-- el `OBJ` debe referenciar el `.mtl` correcto con y sin AO
-
-Ejecutar:
-
-```powershell
-node --test tests/voxelizer.test.js
+```bash
+node --check voxelizer/app.js
+node --check voxelizer/voxel.js
+node --check voxelizer/voxio.js
+node --check voxelizer/worker.js
+node --check voxelizer/batch.js
+node --check voxelizer/worker-channel.js
+node --check voxelizer/transfer.js
+node --check voxelizer/zip.js
+node --test --test-reporter=spec tests/voxelizer.test.js
 ```
 
-## Decisiones técnicas importantes
+GitHub Actions runs the same browser-script checks and full Node suite on pushes to `main` and on pull requests.
 
-- El proyecto sigue una separación razonable entre:
-  - lógica pura de voxelización
-  - capa de UI/render
-  - capa de exportación
-- La exportación OBJ se movió a `VoxIO` para hacerla testeable sin DOM.
-- El `visual hull` ahora respeta `depth`, `depthMode` y `relief`.
-- La cuantización ya no pierde píxeles cuando hay más colores de los que entran en la paleta final.
+## Deliberate limits
 
-## Limitaciones actuales
+- Orthographic visual hulls cannot recover concavities hidden from every view.
+- Bounding-box and landmark alignment do not correct perspective or lens distortion.
+- A depth map is interpreted as a normalized artistic thickness field.
+- VOX stores one palette index per voxel, so its documented mean-of-exposed-faces policy is intentionally lossy; OBJ/MTL and preview retain face-specific materials.
+- No arbitrary-angle or ML reconstruction is claimed.
 
-- La UI todavía usa algunos `innerHTML` que conviene sanear.
-- La carga de imágenes aplica un cap fijo de `96px` por performance.
-- El layout todavía no está trabajado para pantallas chicas.
-- No hay pipeline de CI, linting ni release process.
-- No hay licencia definida todavía.
+## License
 
-## Próximos pasos razonables
-
-1. Sanear los puntos de `innerHTML` que hoy siguen abiertos.
-2. Hacer configurable o explícito el cap de resolución de entrada.
-3. Mejorar accesibilidad de controles interactivos.
-4. Añadir responsive real.
-5. Incorporar CI para correr la suite de regresión automáticamente.
-
-## Contribución
-
-Si vas a tocar el core, la vara técnica tiene que ser alta:
-
-- no romper la semántica de alpha/transparencia
-- no volver a introducir pérdida silenciosa de datos
-- validar cambios con tests de regresión
-- mantener separada la lógica pura del código de UI
-
-## Licencia
-
-Pendiente de definir.
+Not defined yet.

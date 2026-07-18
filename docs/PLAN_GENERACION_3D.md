@@ -1,311 +1,145 @@
-# Plan por fases: mejora de la generacion 3D
+# Deterministic 3D generation: current implementation and roadmap
 
-## Objetivo
+The deterministic core is implemented while preserving legacy output when new controls remain at their defaults. Product-facing inspection, depth-map authoring, browser integration, and advanced camera/mesh work remain open below.
 
-Mejorar la fidelidad de los modelos sin eliminar el flujo actual ni imponer un
-unico tipo de reconstruccion. Cada capacidad nueva debe ser opcional, tener
-valores seguros por defecto y poder combinarse desde la UI.
-
-## Principios de implementacion
-
-- Mantener el resultado actual cuando todas las opciones nuevas esten apagadas.
-- Separar procesamiento de imagen, reconstruccion volumetrica y generacion de malla.
-- Ejecutar el trabajo pesado dentro del worker.
-- Guardar configuraciones como datos serializables, sin referencias al DOM.
-- Añadir tests de regresion antes de cambiar cada algoritmo.
-- No mezclar mejoras geometricas con cambios puramente visuales del visor.
-- Limitar rangos y resoluciones para evitar bloqueos por consumo de memoria.
-
-## Modelo de configuracion propuesto
-
-```js
-{
-  silhouette: {
-    enabled: false,
-    denoiseRadius: 0,
-    closeRadius: 0,
-    feather: 0,
-    resampling: "nearest"
-  },
-  alignment: {
-    side: { offsetX: 0, offsetY: 0, scale: 1, rotation: 0, flipX: false },
-    top: { offsetX: 0, offsetY: 0, scale: 1, rotation: 0, flipX: false }
-  },
-  reconstruction: {
-    mode: "strict",
-    threshold: 1,
-    frontWeight: 1,
-    sideWeight: 1,
-    topWeight: 1
-  },
-  depth: {
-    mode: "symmetric",
-    frontRatio: 0.5,
-    depthMapStrength: 1,
-    invertDepthMap: false
-  },
-  mesh: {
-    mode: "voxel",
-    smoothing: 0,
-    isoLevel: 0.5
-  }
-}
-```
-
-Los nombres definitivos pueden ajustarse durante la implementacion, pero la
-estructura debe conservar grupos independientes para evitar un objeto plano
-dificil de mantener.
-
-## Fase 0: base tecnica y compatibilidad
-
-### Alcance
-
-- Centralizar los valores por defecto y la normalizacion de opciones.
-- Versionar la configuracion para soportar cambios futuros.
-- Separar el pipeline en funciones puras:
-  - preparar siluetas;
-  - transformar vistas;
-  - calcular ocupacion;
-  - generar profundidad;
-  - extraer malla.
-- Añadir mediciones de tiempo por etapa y estimacion de memoria.
-- Crear fixtures pequeños para frontal, lateral, cenital y mapa de profundidad.
-
-### UI
-
-- Crear una seccion `Reconstruccion avanzada`.
-- Mantenerla contraida inicialmente.
-- Añadir un boton `Restablecer` por grupo.
-- Deshabilitar controles que no apliquen al modo seleccionado.
-
-### Tests
-
-- La configuracion por defecto produce el mismo grid que la version actual.
-- Las opciones incompletas o antiguas se normalizan correctamente.
-- El worker recibe y devuelve configuraciones sin perder campos.
-
-### Criterio de cierre
-
-El pipeline queda preparado para incorporar algoritmos nuevos sin alterar el
-resultado actual.
-
-## Fase 1: limpieza y remuestreo de siluetas
-
-### Alcance
-
-- Sustituir la mascara binaria directa por una etapa de preprocesamiento.
-- Añadir eliminacion de ruido para componentes o puntos aislados.
-- Añadir cierre morfologico para pequeños huecos.
-- Ofrecer remuestreo `nearest`, `area` y `bilinear`.
-- Mantener el umbral alpha como paso final configurable.
-
-### UI
-
-- Interruptor `Procesar silueta`.
-- Control `Eliminar ruido`.
-- Control `Cerrar huecos`.
-- Selector `Remuestreo`.
-- Vista previa 2D de la mascara resultante.
-
-### Tests
-
-- No se pierden extremidades de un pixel con los valores por defecto.
-- El cierre rellena huecos dentro del radio solicitado.
-- El filtro elimina ruido sin modificar regiones validas grandes.
-- Cada remuestreo genera dimensiones y valores validos.
-
-### Criterio de cierre
-
-Las vistas auxiliares llegan limpias al visual hull y el usuario puede comparar
-la mascara original con la procesada.
-
-## Fase 2: alineacion multivista
-
-### Alcance
-
-- Transformar cada vista antes de generar su mascara.
-- Soportar desplazamiento, escala, rotacion y espejo.
-- Definir claramente los ejes frontal, lateral y cenital.
-- Aplicar las transformaciones en un canvas intermedio dentro del worker.
-- Incorporar una opcion de ajuste automatico inicial por bounding box.
-
-### UI
-
-- Controles independientes para vista lateral y cenital.
-- Superposicion de guias y bounding boxes.
-- Acciones `Ajuste automatico`, `Centrar` y `Restablecer`.
-- Previsualizacion sincronizada de los ejes compartidos.
-
-### Tests
-
-- Las transformaciones respetan el centro y la orientacion esperados.
-- El ajuste por bounding box alinea siluetas con margenes diferentes.
-- Rotaciones y espejos no cambian las dimensiones finales del volumen.
-- Una vista ausente no afecta a las restantes.
-
-### Criterio de cierre
-
-El usuario puede corregir fuentes descentradas o con escalas distintas antes de
-que intersecten en el volumen.
-
-## Fase 3: reconstruccion por confianza
-
-### Alcance
-
-- Conservar el modo `strict` actual.
-- Añadir un modo `weighted` basado en votos de las vistas disponibles.
-- Permitir peso independiente para frontal, lateral y cenital.
-- Añadir un umbral de ocupacion y una tolerancia de borde.
-- Exponer un mapa de confianza opcional para diagnostico.
-- Evitar que una fila o columna vacia destruya regiones completas por error.
-
-### UI
-
-- Selector `Estricto` / `Por confianza`.
-- Pesos por vista.
-- Control de umbral.
-- Control de tolerancia de borde.
-- Modo de depuracion que coloree voxeles por confianza.
-
-### Tests
-
-- El modo estricto reproduce exactamente el comportamiento previo.
-- Una discrepancia de una vista puede conservarse con el umbral adecuado.
-- Los pesos cambian la decision de ocupacion de forma determinista.
-- Nunca se crean voxeles fuera de la silueta frontal salvo opcion explicita.
-
-### Criterio de cierre
-
-La reconstruccion tolera pequeñas diferencias entre vistas sin convertir el
-modelo en un volumen arbitrario.
-
-## Fase 4: profundidad asimetrica y mapas de profundidad
-
-### Alcance
-
-- Mantener el modo simetrico actual.
-- Añadir reparto frontal/trasero configurable.
-- Admitir un mapa de profundidad en escala de grises.
-- Permitir invertir, escalar y suavizar el mapa.
-- Definir comportamiento cuando el mapa no coincide en resolucion.
-- Combinar el mapa de profundidad con el visual hull sin superar sus limites.
-
-### UI
-
-- Selector `Simetrica`, `Asimetrica` o `Mapa de profundidad`.
-- Control de proporcion frontal/trasera.
-- Slot de carga para el mapa.
-- Controles de intensidad, inversion y suavizado.
-- Previsualizacion 2D del mapa normalizado.
-
-### Tests
-
-- El modo simetrico mantiene la geometria existente.
-- Los extremos 0/100 del reparto colocan correctamente el volumen.
-- Negro y blanco producen los limites de profundidad definidos.
-- Un mapa transparente o invalido muestra un error recuperable.
-- El visual hull sigue siendo el limite exterior del volumen.
-
-### Criterio de cierre
-
-La aplicacion puede generar una espalda distinta del frente y usar informacion
-de profundidad explicita sin romper los formatos de exportacion.
-
-## Fase 5: malla suave opcional
-
-Esta fase es independiente de las cuatro mejoras principales. Debe abordarse
-solo cuando la ocupacion volumetrica sea fiable.
-
-### Alcance
-
-- Mantener `Voxel + greedy meshing` como modo principal.
-- Añadir `Marching Cubes` como salida suavizada.
-- Evaluar `Dual Contouring` si es necesario preservar esquinas.
-- Generar normales y deduplicar vertices para OBJ.
-- Definir como se transfieren los colores del grid a la superficie.
-
-### UI
-
-- Selector `Voxel` / `Suave`.
-- Controles de suavizado e iso-superficie.
-- Comparacion de numero de caras y memoria estimada.
-
-### Tests
-
-- La malla queda cerrada y sin triangulos degenerados.
-- Los indices siempre apuntan a vertices validos.
-- El color se conserva dentro de una tolerancia definida.
-- La exportacion OBJ abre correctamente con ambos modos.
-
-### Criterio de cierre
-
-El usuario puede elegir entre estetica voxel y superficie suavizada sin mezclar
-los algoritmos ni cambiar silenciosamente el formato.
-
-## Fase 6: presets, persistencia y experiencia final
-
-### Alcance
-
-- Añadir presets `Pixel art`, `Detalle fino`, `Tolerante` y `Mapa de profundidad`.
-- Guardar la configuracion en `localStorage`.
-- Permitir importar y exportar presets en JSON.
-- Incluir la configuracion usada dentro del ZIP del batch.
-- Añadir advertencias cuando una combinacion sea costosa o contradictoria.
-
-### Tests
-
-- Los presets producen configuraciones completas y validas.
-- Una configuracion guardada se restaura entre sesiones.
-- Los presets antiguos migran mediante la version de configuracion.
-- La exportacion batch conserva una copia de los parametros.
-
-### Criterio de cierre
-
-La personalizacion es reutilizable y reproducible, no solamente un conjunto de
-sliders que el usuario debe recordar.
-
-## Orden de entrega recomendado
-
-1. Fase 0: base tecnica.
-2. Fase 1: siluetas.
-3. Fase 2: alineacion.
-4. Fase 3: confianza.
-5. Fase 4: profundidad.
-6. Fase 6: presets y persistencia.
-7. Fase 5: malla suave, como evolucion opcional.
-
-## Estrategia de commits
-
-- Un commit de tests y contratos por fase.
-- Un commit del core por capacidad coherente.
-- Un commit de UI y documentacion cuando el core ya este validado.
-- Commits convencionales, sin mezclar refactors no relacionados.
-
-Ejemplos:
+## Pipeline
 
 ```text
-test: cover silhouette preprocessing
-feat: add configurable silhouette cleanup
-feat: add multiview alignment controls
-feat: add weighted voxel reconstruction
-feat: support asymmetric depth maps
+validate payloads
+→ preprocess front and auxiliary silhouettes
+→ normalize calibrated view descriptors
+→ estimate single-view depth envelope
+→ strict or confidence-weighted occupancy
+→ project and diagnose every supported view
+→ assign face-specific surface colors
+→ derive the explicit lossy per-voxel VOX color
+→ greedy/naive voxel faces
+→ VOX or OBJ/MTL export
 ```
 
-## Riesgos y limites
+## Capability status
 
-- A mayor resolucion y profundidad, el grid crece de forma cubica en el peor caso.
-- El filtrado excesivo puede borrar detalles propios del pixel art.
-- Una reconstruccion por confianza mejora tolerancia, pero tambien puede crear
-  volumen donde las fuentes no aportan informacion suficiente.
-- Un mapa de profundidad generado automaticamente no equivale a geometria real.
-- La malla suave exige otra estrategia de color y puede aumentar mucho las caras.
-- La alineacion automatica por bounding box no resuelve diferencias de perspectiva.
+| Area | Implemented behavior |
+|---|---|
+| Configuration | `CONFIG_VERSION=2`, explicit v1 migration, legacy round-trip, opt-in local-width mode; inert smooth-mesh fields removed |
+| Validation | Positive dimensions, exact RGBA payload length, unified `alpha > threshold` semantics, per-stage and aggregate budgets |
+| Silhouettes | Core supports optional denoise, close, feather, nearest, area, and bilinear resampling; processed/original comparison UI is not implemented |
+| Single view | Uniform, DT, Poisson, SFS, Combo, and Humanoid profiles; v1 grids remain default and local-width awareness is opt-in |
+| Z envelope | Symmetric, asymmetric `frontRatio` (`0=-Z`, `1=+Z/front`), supplied depth map, strength, and inversion; smoothing and normalized-map preview remain open |
+| Views | Serializable `views[]`; canonical orientation tuples are enforced and malformed/unsupported descriptors are diagnostic-only |
+| Calibration | Manual transform, bounding-box autofit, and explicit point landmarks |
+| Occupancy | Strict visual hull or weighted confidence with boundary distance, weights, threshold, and hard-front constraint |
+| Diagnostics | Empty front/view, missing map, unsupported role, empty result, low IoU, residual, and conflicting view; confidence-field debugging remains open |
+| Overlays | Target-only, accepted overlap, and projection-only pixels with per-view IoU/residual; same-role views can be selected by ID |
+| Colors | Face-specific front/side/top/back materials for preview and OBJ/MTL; explicit mean-of-exposed-faces policy for lossy VOX |
+| Animation | Explicit core `frames[]`; UI per-view metadata chooses `static` or `sheet` without size inference |
+| Workers | Immutable canonical jobs, incarnation-safe events, validated voxel-result envelopes, whole-incarnation settlement on protocol/dispatch failure, idle reuse, cancellation, visible fallback, bounded retry |
+| Exports | OBJ/MTL and VOX; used RGB colors are remapped exactly to 1..255 and excess colors are rejected |
+| Metrics | Stage timing, typed data, diagnostic buffers, face estimate, and bytes per occupied voxel |
 
-## Definicion global de terminado
+## Quality gates
 
-- El comportamiento anterior sigue disponible y cubierto por tests.
-- Todas las opciones tienen ayuda contextual y limites claros.
-- El procesamiento pesado permanece fuera del hilo principal.
-- Cancelacion, preview y batch utilizan exactamente el mismo pipeline.
-- Los resultados son deterministas con la misma entrada y configuracion.
-- README y ejemplos reflejan los modos disponibles.
+The Node suite covers:
+
+- golden-grid output for every active depth profile;
+- preprocessing and every resampling mode;
+- symmetric/asymmetric/depth-map envelopes;
+- strict and weighted reconstruction, weights, thresholds, edge tolerance, and hard-front relaxation;
+- invalid, empty, contradictory, and unsupported inputs;
+- projection diagnostics and overlays;
+- auxiliary RGB fusion and front-only compatibility;
+- per-frame view selection and landmark calibration;
+- worker response integrity;
+- OBJ/MTL, ZIP, and VOX palette-index behavior;
+- moderate-volume time and memory sanity.
+
+Run the same checks as CI:
+
+```bash
+node --check voxelizer/app.js
+node --check voxelizer/voxel.js
+node --check voxelizer/voxio.js
+node --check voxelizer/worker.js
+node --check voxelizer/batch.js
+node --check voxelizer/worker-channel.js
+node --check voxelizer/transfer.js
+node --check voxelizer/zip.js
+node --test --test-reporter=spec tests/voxelizer.test.js
+```
+
+## Architectural boundaries
+
+### Single-image uncertainty
+
+One front image cannot reveal its back, hidden cavities, or true depth. The six profiles and grayscale map are explicit artistic priors. The UI and README state this rather than presenting the result as recovered geometry.
+
+### Supported cameras
+
+Only calibrated orthographic front (X/Y), side (Z/Y), and top (X/Z) projections carve the grid. The internal descriptor can carry more views, but an unsupported role produces `UNSUPPORTED_VIEW_ROLE`; arbitrary-angle projection is not faked.
+
+### Smooth meshes
+
+Smooth-mesh settings were deliberately removed. Adding Marching Cubes safely requires a separate surface-color model, normals, topology validation, renderer path, and OBJ tests. Until that complete contract exists, voxel faces are the truthful supported output.
+
+### VOX palette and material capacity
+
+VOX voxel indices reserve byte `0`, leaving indices `1..255` representable, and cannot represent face-specific materials. Preview and OBJ/MTL retain per-face colors. VOX deliberately stores the mean of each voxel's exposed face colors, deduplicates used RGB values, remaps them to `1..255`, and rejects more than 255 distinct results.
+
+Public reconstruction calls are guarded before expensive allocations: front images are capped at 4,194,304 pixels, logical grids at 16,777,216 cells, auxiliary inputs by count/cumulative pixels/bytes, morphology per view and in aggregate, occupied meshing at 2,097,152 voxels, and face objects by exposed-face/estimated-byte budgets.
+
+## Remaining backlog and acceptance criteria
+
+### Perspective and arbitrary-angle calibration
+
+- [ ] Store camera intrinsics/extrinsics for every non-canonical view.
+- [ ] Project a known calibration fixture with sub-pixel residual reporting.
+- [ ] Reject incomplete camera metadata before carving.
+- [ ] Prove two arbitrary-angle golden fixtures without changing orthographic baselines.
+
+**Acceptance:** arbitrary roles are enabled only after their projector, calibration UI, and golden projections exist. Until then they remain `UNSUPPORTED_ORIENTATION`/`UNSUPPORTED_VIEW_ROLE` diagnostics.
+
+### Smooth surface contract
+
+- [ ] Define signed density independently from palette-index occupancy.
+- [ ] Choose Marching Cubes or Dual Contouring with topology criteria.
+- [ ] Define normals, material interpolation, renderer behavior, and OBJ serialization.
+- [ ] Test closed surfaces, valid indices, non-degenerate triangles, and bounded color error.
+
+**Acceptance:** no smooth control returns until browser preview and exported OBJ share the tested surface/material contract.
+
+### Presets and persistence
+
+- [ ] Add versioned Pixel Art, Fine Detail, Tolerant, and Depth Map presets.
+- [ ] Migrate stored v1/v2 configurations through the public migration function.
+- [ ] Import/export presets as JSON and include the effective config in batch ZIPs.
+- [ ] Restore state without changing default legacy grids.
+
+**Acceptance:** a saved preset round-trips every active field and reproduces the same grid after reload.
+
+### Browser integration and batch resilience
+
+- [ ] Exercise drag/drop, explicit static/sheet metadata, and per-frame auxiliary selection in a real browser.
+- [ ] Mutate live UI state during a batch and prove the immutable manifest keeps names, totals, pixels, views, alignment, and options unchanged.
+- [ ] Crash a worker, observe `WORKER_FALLBACK`, then prove a later bounded retry recovers.
+- [ ] Cancel worker-backed and synchronous-fallback batches with documented latency.
+
+**Acceptance:** browser tests prove idle worker reuse, stale preview invalidation, immutable batch outputs, recovery, and cancellation. Synchronous fallback remains unavoidably non-preemptive while one `voxelize()` call is executing.
+
+### Diagnostics and usability
+
+- [x] Let users select among multiple same-role view IDs in the overlay UI.
+- [ ] Export per-view IoU/residual diagnostics with batch artifacts.
+- [ ] Add budget guidance before users request costly dimensions.
+- [ ] Add accessible descriptions for overlap colors and severity.
+- [ ] Expose input confidence and weighted-score fields in a per-view debug panel.
+
+### Depth-map and silhouette inspection
+
+- [ ] Add configurable depth-map smoothing without changing the raw source.
+- [ ] Show raw and normalized depth-map previews with inversion and strength applied.
+- [ ] Show original and processed silhouettes side by side for front and auxiliary views.
+- [ ] Add a one-action reset from processed silhouette settings to the untouched source.
+
+**Acceptance:** users can inspect exactly which normalized scalar map and processed mask enter reconstruction, compare them with the originals, and reset processing without reloading images.
+
+**Acceptance:** every diagnostic shown in the UI identifies its view ID, stage, severity, and corrective action.
