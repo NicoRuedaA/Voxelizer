@@ -3,12 +3,31 @@
    turns into geometry. This is where the --depth / --alpha / quantize /
    --depth-map / greedy options actually take effect. */
 
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
+const MAX_PIXEL_COUNT = 4 * 1024 * 1024;
+const MAX_VOXEL_COUNT = 16 * 1024 * 1024;
+const MAX_MORPH_WORK = 64 * 1024 * 1024;
+const MAX_TOTAL_MORPH_WORK = 128 * 1024 * 1024;
+const MAX_VIEW_COUNT = 8;
+const MAX_AUX_PIXEL_COUNT = 8 * 1024 * 1024;
+const MAX_AUX_BYTES = 32 * 1024 * 1024;
+const MAX_MESH_VOXELS = 2 * 1024 * 1024;
+const MAX_EXPOSED_FACES = 250000;
+const MAX_FACE_ALLOCATION_BYTES = 64 * 1024 * 1024;
+const FACE_OBJECT_ESTIMATE_BYTES = 152;
 const RESAMPLING_MODES = ['nearest', 'area', 'bilinear'];
 const RECONSTRUCTION_MODES = ['strict', 'weighted'];
 const DEPTH_VOLUME_MODES = ['symmetric', 'asymmetric', 'depthmap'];
 const DEPTH_PROFILE_MODES = ['uniform', 'dt', 'poisson', 'sfs', 'combo', 'humanoid'];
-const MESH_MODES = ['voxel', 'smooth'];
+const MESH_MODES = ['voxel'];
+const COLOR_MODES = ['front', 'auxiliary'];
+const SURFACE_COLOR_MODES = ['front', 'auxiliary', 'darken'];
+const BACK_COLOR_MODES = ['front', 'darken'];
+const CANONICAL_ORIENTATIONS = {
+  side: { projection: 'orthographic', horizontal: '+Z', vertical: '-Y' },
+  top: { projection: 'orthographic', horizontal: '+X', vertical: '+Z' },
+  depthmap: { projection: 'orthographic', horizontal: '+X', vertical: '-Y' },
+};
 
 const DEFAULT_CONFIG = {
   version: CONFIG_VERSION,
@@ -38,6 +57,7 @@ const DEFAULT_CONFIG = {
     frontWeight: 1,
     sideWeight: 1,
     topWeight: 1,
+    hardFrontConstraint: true,
   },
   depth: {
     layers: 6,
@@ -56,6 +76,7 @@ const DEFAULT_CONFIG = {
     humSmooth: 0.3,
     depthMapStrength: 1,
     invertDepthMap: false,
+    localWidthAware: false,
   },
   mesh: {
     mode: 'voxel',
@@ -63,8 +84,12 @@ const DEFAULT_CONFIG = {
     scale: 1,
     ao: false,
     aoStrength: 0.8,
-    smoothing: 0,
-    isoLevel: 0.5,
+  },
+  color: {
+    mode: 'front',
+    side: 'front',
+    back: 'front',
+    darken: 0.72,
   },
 };
 
@@ -106,7 +131,7 @@ function _coerceBool(value, fallback) {
 function _configShape(input) {
   if (!_isObject(input)) return {};
   const out = {};
-  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'depth', 'mesh'];
+  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'depth', 'mesh', 'color'];
   for (const key of keys) {
     const value = input[key];
     if (key === 'version') {
@@ -139,6 +164,27 @@ function _legacyPatch(input) {
   if ('humPrior' in input) patch.depth = { ...(patch.depth || {}), humPrior: input.humPrior };
   if ('humHead' in input) patch.depth = { ...(patch.depth || {}), humHead: input.humHead };
   if ('humSmooth' in input) patch.depth = { ...(patch.depth || {}), humSmooth: input.humSmooth };
+  if ('depthVolumeMode' in input) patch.depth = { ...(patch.depth || {}), mode: input.depthVolumeMode };
+  if ('frontRatio' in input) patch.depth = { ...(patch.depth || {}), frontRatio: input.frontRatio };
+  if ('depthMapStrength' in input) patch.depth = { ...(patch.depth || {}), depthMapStrength: input.depthMapStrength };
+  if ('invertDepthMap' in input) patch.depth = { ...(patch.depth || {}), invertDepthMap: input.invertDepthMap };
+  if ('localWidthAware' in input) patch.depth = { ...(patch.depth || {}), localWidthAware: input.localWidthAware };
+  if ('silhouetteEnabled' in input) patch.silhouette = { ...(patch.silhouette || {}), enabled: input.silhouetteEnabled };
+  if ('denoiseRadius' in input) patch.silhouette = { ...(patch.silhouette || {}), denoiseRadius: input.denoiseRadius };
+  if ('closeRadius' in input) patch.silhouette = { ...(patch.silhouette || {}), closeRadius: input.closeRadius };
+  if ('feather' in input) patch.silhouette = { ...(patch.silhouette || {}), feather: input.feather };
+  if ('resampling' in input) patch.silhouette = { ...(patch.silhouette || {}), resampling: input.resampling };
+  if ('reconstructionMode' in input) patch.reconstruction = { ...(patch.reconstruction || {}), mode: input.reconstructionMode };
+  if ('reconstructionThreshold' in input) patch.reconstruction = { ...(patch.reconstruction || {}), threshold: input.reconstructionThreshold };
+  if ('edgeTolerance' in input) patch.reconstruction = { ...(patch.reconstruction || {}), edgeTolerance: input.edgeTolerance };
+  if ('frontWeight' in input) patch.reconstruction = { ...(patch.reconstruction || {}), frontWeight: input.frontWeight };
+  if ('sideWeight' in input) patch.reconstruction = { ...(patch.reconstruction || {}), sideWeight: input.sideWeight };
+  if ('topWeight' in input) patch.reconstruction = { ...(patch.reconstruction || {}), topWeight: input.topWeight };
+  if ('hardFrontConstraint' in input) patch.reconstruction = { ...(patch.reconstruction || {}), hardFrontConstraint: input.hardFrontConstraint };
+  if ('colorMode' in input) patch.color = { ...(patch.color || {}), mode: input.colorMode };
+  if ('sideColorMode' in input) patch.color = { ...(patch.color || {}), side: input.sideColorMode };
+  if ('backColorMode' in input) patch.color = { ...(patch.color || {}), back: input.backColorMode };
+  if ('colorDarken' in input) patch.color = { ...(patch.color || {}), darken: input.colorDarken };
   return patch;
 }
 function _normalizeViewTransform(input) {
@@ -155,7 +201,17 @@ function _normalizeViewTransform(input) {
 function createDefaultConfig() {
   return _cloneConfig(DEFAULT_CONFIG);
 }
+function migrateConfig(input) {
+  if (!_isObject(input)) return input;
+  const migrated = _cloneConfig(input);
+  if (Number(migrated.version) === 1) {
+    migrated.depth = { ...(migrated.depth || {}), localWidthAware: false };
+    migrated.version = CONFIG_VERSION;
+  }
+  return migrated;
+}
 function normalizeConfig(input) {
+  input = migrateConfig(input);
   const merged = _mergeDeep(
     _mergeDeep(createDefaultConfig(), _legacyPatch(input)),
     _configShape(input)
@@ -188,6 +244,7 @@ function normalizeConfig(input) {
       frontWeight: _clampNumber(merged.reconstruction && merged.reconstruction.frontWeight, 0, 4, DEFAULT_CONFIG.reconstruction.frontWeight),
       sideWeight: _clampNumber(merged.reconstruction && merged.reconstruction.sideWeight, 0, 4, DEFAULT_CONFIG.reconstruction.sideWeight),
       topWeight: _clampNumber(merged.reconstruction && merged.reconstruction.topWeight, 0, 4, DEFAULT_CONFIG.reconstruction.topWeight),
+      hardFrontConstraint: _coerceBool(merged.reconstruction && merged.reconstruction.hardFrontConstraint, DEFAULT_CONFIG.reconstruction.hardFrontConstraint),
     },
     depth: {
       layers: _clampInt(merged.depth && merged.depth.layers, 1, 64, DEFAULT_CONFIG.depth.layers),
@@ -206,6 +263,7 @@ function normalizeConfig(input) {
       humSmooth: _clampNumber(merged.depth && merged.depth.humSmooth, 0, 1, DEFAULT_CONFIG.depth.humSmooth),
       depthMapStrength: _clampNumber(merged.depth && merged.depth.depthMapStrength, 0, 4, DEFAULT_CONFIG.depth.depthMapStrength),
       invertDepthMap: _coerceBool(merged.depth && merged.depth.invertDepthMap, DEFAULT_CONFIG.depth.invertDepthMap),
+      localWidthAware: _coerceBool(merged.depth && merged.depth.localWidthAware, DEFAULT_CONFIG.depth.localWidthAware),
     },
     mesh: {
       mode: _pickEnum(merged.mesh && merged.mesh.mode, MESH_MODES, DEFAULT_CONFIG.mesh.mode),
@@ -213,8 +271,12 @@ function normalizeConfig(input) {
       scale: _clampNumber(merged.mesh && merged.mesh.scale, 0.1, 16, DEFAULT_CONFIG.mesh.scale),
       ao: _coerceBool(merged.mesh && merged.mesh.ao, DEFAULT_CONFIG.mesh.ao),
       aoStrength: _clampNumber(merged.mesh && merged.mesh.aoStrength, 0, 1, DEFAULT_CONFIG.mesh.aoStrength),
-      smoothing: _clampNumber(merged.mesh && merged.mesh.smoothing, 0, 1, DEFAULT_CONFIG.mesh.smoothing),
-      isoLevel: _clampNumber(merged.mesh && merged.mesh.isoLevel, 0, 1, DEFAULT_CONFIG.mesh.isoLevel),
+    },
+    color: {
+      mode: _pickEnum(merged.color && merged.color.mode, COLOR_MODES, DEFAULT_CONFIG.color.mode),
+      side: _pickEnum(merged.color && merged.color.side, SURFACE_COLOR_MODES, DEFAULT_CONFIG.color.side),
+      back: _pickEnum(merged.color && merged.color.back, BACK_COLOR_MODES, DEFAULT_CONFIG.color.back),
+      darken: _clampNumber(merged.color && merged.color.darken, 0.1, 1, DEFAULT_CONFIG.color.darken),
     },
   };
   return normalized;
@@ -241,6 +303,27 @@ function legacyOptionsFromConfig(input) {
     humPrior: config.depth.humPrior,
     humHead: config.depth.humHead,
     humSmooth: config.depth.humSmooth,
+    depthVolumeMode: config.depth.mode,
+    frontRatio: config.depth.frontRatio,
+    depthMapStrength: config.depth.depthMapStrength,
+    invertDepthMap: config.depth.invertDepthMap,
+    localWidthAware: config.depth.localWidthAware,
+    silhouetteEnabled: config.silhouette.enabled,
+    denoiseRadius: config.silhouette.denoiseRadius,
+    closeRadius: config.silhouette.closeRadius,
+    feather: config.silhouette.feather,
+    resampling: config.silhouette.resampling,
+    reconstructionMode: config.reconstruction.mode,
+    reconstructionThreshold: config.reconstruction.threshold,
+    edgeTolerance: config.reconstruction.edgeTolerance,
+    frontWeight: config.reconstruction.frontWeight,
+    sideWeight: config.reconstruction.sideWeight,
+    topWeight: config.reconstruction.topWeight,
+    hardFrontConstraint: config.reconstruction.hardFrontConstraint,
+    colorMode: config.color.mode,
+    sideColorMode: config.color.side,
+    backColorMode: config.color.back,
+    colorDarken: config.color.darken,
   };
 }
 function defaultLegacyOptions() {
@@ -269,6 +352,83 @@ function canvasToPixels(canvas) {
   const w = canvas.width, h = canvas.height;
   const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
   return { w, h, data };
+}
+
+function validatePixels(pixels, label) {
+  const name = label || 'pixels';
+  if (!pixels || typeof pixels !== 'object') throw new TypeError(`${name} must be a pixel payload`);
+  const w = pixels.w, h = pixels.h;
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0)
+    throw new RangeError(`${name} dimensions must be positive safe integers`);
+  if (w > Math.floor(Number.MAX_SAFE_INTEGER / h)) throw _budgetError('PIXEL_DIMENSION_OVERFLOW', `${name} dimensions overflow safe multiplication`);
+  const count = w * h;
+  if (count > MAX_PIXEL_COUNT) throw _budgetError('PIXEL_BUDGET_EXCEEDED', `${name} exceeds the ${MAX_PIXEL_COUNT}-pixel budget`);
+  const data = pixels.data;
+  const typedRgba = ArrayBuffer.isView(data) && !(data instanceof DataView)
+    && data.BYTES_PER_ELEMENT === 1 && (data.constructor.name === 'Uint8Array' || data.constructor.name === 'Uint8ClampedArray');
+  if (!typedRgba) throw new TypeError(`${name}.data must be Uint8Array or Uint8ClampedArray RGBA data`);
+  if (data.length !== count * 4)
+    throw new RangeError(`${name}.data length must equal w*h*4`);
+  return { w, h, data };
+}
+
+function _budgetError(code, message) {
+  const error = new RangeError(message);
+  error.code = code;
+  return error;
+}
+function _assertVoxelBudget(w, h, depth) {
+  if (w > Math.floor(Number.MAX_SAFE_INTEGER / h) || w * h > Math.floor(Number.MAX_SAFE_INTEGER / depth))
+    throw _budgetError('VOXEL_DIMENSION_OVERFLOW', 'Voxel dimensions overflow safe multiplication');
+  const count = w * h * depth;
+  if (count > MAX_VOXEL_COUNT) throw _budgetError('VOXEL_BUDGET_EXCEEDED', `Voxel grid exceeds the ${MAX_VOXEL_COUNT}-cell budget`);
+  return count;
+}
+
+function _binaryMorph(mask, w, h, radius, dilate) {
+  if (!radius) return new Uint8Array(mask);
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let value = dilate ? 0 : 1;
+    outer: for (let yy = Math.max(0, y - radius); yy <= Math.min(h - 1, y + radius); yy++) {
+      for (let xx = Math.max(0, x - radius); xx <= Math.min(w - 1, x + radius); xx++) {
+        const hit = mask[xx + w * yy] ? 1 : 0;
+        if ((dilate && hit) || (!dilate && !hit)) { value = dilate ? 1 : 0; break outer; }
+      }
+    }
+    out[x + w * y] = value;
+  }
+  return out;
+}
+
+function _preprocessMask(mask, w, h, config) {
+  if (!config.enabled) return new Uint8Array(mask);
+  let out = new Uint8Array(mask);
+  if (config.denoiseRadius > 0) {
+    out = _binaryMorph(_binaryMorph(out, w, h, config.denoiseRadius, false), w, h, config.denoiseRadius, true);
+  }
+  if (config.closeRadius > 0) {
+    out = _binaryMorph(_binaryMorph(out, w, h, config.closeRadius, true), w, h, config.closeRadius, false);
+  }
+  return out;
+}
+
+function _morphWork(w, h, silhouette) {
+  if (!silhouette.enabled) return 0;
+  const radius = Math.max(silhouette.denoiseRadius, silhouette.closeRadius);
+  return w * h * Math.max(1, (2 * radius + 1) ** 2) * 4;
+}
+
+function preprocessPixels(pixels, silhouette) {
+  const normalized = validatePixels(pixels, 'front');
+  const { w, h, data } = normalized;
+  if (!silhouette.enabled) return normalized;
+  const work = _morphWork(w, h, silhouette);
+  if (work > MAX_MORPH_WORK) throw _budgetError('MORPH_BUDGET_EXCEEDED', `Silhouette morphology exceeds the ${MAX_MORPH_WORK}-operation budget`);
+  const mask = _preprocessMask(_maskFrom(normalized, silhouette.alphaThreshold), w, h, silhouette);
+  const out = new Uint8ClampedArray(data);
+  for (let i = 0; i < w * h; i++) out[i * 4 + 3] = mask[i] ? 255 : 0;
+  return { w, h, data: out };
 }
 
 // ---- agglomerative palette quantization (merge nearest colors) ----
@@ -386,15 +546,40 @@ function _edtSq(mask, w, h) {
   return f;
 }
 
+function _componentLabels(mask, w, h) {
+  const labels = new Int32Array(w * h).fill(-1);
+  const components = [];
+  const queue = new Int32Array(w * h);
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || labels[start] >= 0) continue;
+    const id = components.length;
+    let head = 0, tail = 0;
+    queue[tail++] = start; labels[start] = id;
+    const indices = [];
+    while (head < tail) {
+      const i = queue[head++], x = i % w, y = (i / w) | 0;
+      indices.push(i);
+      const next = [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1];
+      for (const n of next) if (n >= 0 && mask[n] && labels[n] < 0) { labels[n] = id; queue[tail++] = n; }
+    }
+    components.push(indices);
+  }
+  return { labels, components };
+}
+
 // (A) Distance transform. 'round' 0..1 mezcla bisel lineal <-> hombro esferico.
-function _profDT(mask, w, h, round) {
+function _profDT(mask, w, h, round, componentLocal) {
   if (round == null) round = 1;
   const sq = _edtSq(mask, w, h);
-  let mx = 0;
-  for (let i = 0; i < w * h; i++) if (mask[i]) { const d = Math.sqrt(sq[i]); if (d > mx) mx = d; }
-  const p = new Float32Array(w * h);
-  if (mx <= 0) return p;
+  const componentState = componentLocal ? _componentLabels(mask, w, h) : null;
+  const maxima = new Float64Array(componentState ? componentState.components.length : 1);
   for (let i = 0; i < w * h; i++) if (mask[i]) {
+    const d = Math.sqrt(sq[i]), id = componentState ? componentState.labels[i] : 0;
+    if (d > maxima[id]) maxima[id] = d;
+  }
+  const p = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) if (mask[i]) {
+    const mx = maxima[componentState ? componentState.labels[i] : 0] || 1;
     const dn = Math.sqrt(sq[i]) / mx;
     const sph = Math.sqrt(Math.max(0, 2 * dn - dn * dn)); // hombro esferico
     p[i] = dn + round * (sph - dn);                       // 0=bisel, 1=esfera
@@ -444,9 +629,9 @@ function _profSFS(mask, lum, w, h, gamma) {
 }
 
 // (D) Combo: bulto DT modulado por la sombra. 'mix' 0=solo DT, 1=sombra fuerte.
-function _profCombo(mask, lum, w, h, mix) {
+function _profCombo(mask, lum, w, h, mix, componentLocal) {
   const m = mix == null ? 0.5 : mix;
-  const dt = _profDT(mask, w, h, 1), sf = _normLum(mask, lum, w, h);
+  const dt = _profDT(mask, w, h, 1, componentLocal), sf = _normLum(mask, lum, w, h);
   const p = new Float32Array(w * h);
   let mx = 0;
   for (let i = 0; i < w * h; i++) if (mask[i]) {
@@ -536,6 +721,29 @@ function _profHumanoid(mask, lum, w, h, o) {
   return smooth > 0 ? _smoothMasked(prof, mask, w, h, smooth) : prof;
 }
 
+function _applyLocalWidth(profile, mask, w, h) {
+  if (!profile) return profile;
+  const widths = new Uint16Array(w * h);
+  let maxWidth = 1;
+  for (let y = 0; y < h; y++) {
+    let x = 0;
+    while (x < w) {
+      if (!mask[x + w * y]) { x++; continue; }
+      const x0 = x;
+      while (x < w && mask[x + w * y]) x++;
+      const width = x - x0;
+      if (width > maxWidth) maxWidth = width;
+      for (let xx = x0; xx < x; xx++) widths[xx + w * y] = width;
+    }
+  }
+  const out = new Float32Array(profile.length);
+  for (let i = 0; i < profile.length; i++) if (mask[i]) {
+    const local = Math.sqrt(Math.max(1, widths[i]) / maxWidth);
+    out[i] = Math.max(0, Math.min(1, profile[i] * local));
+  }
+  return out;
+}
+
 // dispatcher: quant + modo + opts -> perfil 0..1
 function depthProfile(quant, mode, opts) {
   const { idxAt, palette, w, h } = quant;
@@ -548,11 +756,14 @@ function depthProfile(quant, mode, opts) {
       lum[i] = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
     }
   }
-  if (mode === 'dt') return _profDT(mask, w, h, opts.dtRound);
-  if (mode === 'poisson') return _profPoisson(mask, w, h, opts.poissonTension);
-  if (mode === 'sfs') return _profSFS(mask, lum, w, h, opts.sfsGamma);
-  if (mode === 'combo') return _profCombo(mask, lum, w, h, opts.comboMix);
-  if (mode === 'humanoid') return _profHumanoid(mask, lum, w, h, opts);
+  let profile = null;
+  if (mode === 'dt') profile = _profDT(mask, w, h, opts.dtRound, !!opts.localWidthAware);
+  else if (mode === 'poisson') profile = _profPoisson(mask, w, h, opts.poissonTension);
+  else if (mode === 'sfs') profile = _profSFS(mask, lum, w, h, opts.sfsGamma);
+  else if (mode === 'combo') profile = _profCombo(mask, lum, w, h, opts.comboMix, !!opts.localWidthAware);
+  else if (mode === 'humanoid') profile = _profHumanoid(mask, lum, w, h, opts);
+  if (profile && mode !== 'humanoid' && opts.localWidthAware) return _applyLocalWidth(profile, mask, w, h);
+  if (profile) return profile;
   return null; // uniforme
 }
 
@@ -563,12 +774,18 @@ function depthSpanAt(index, depth, prof, relief) {
 }
 
 // ---- build 3D voxel grid from quantized pixels ----
+function _depthStart(depth, span, mode, frontRatio) {
+  if (mode !== 'asymmetric') return (depth - span) >> 1;
+  return Math.max(0, Math.min(depth - span, Math.round((depth - span) * frontRatio)));
+}
+
 function buildGrid(quant, depthState) {
   const { idxAt, w, h } = quant;
   const depth = Math.max(1, depthState.layers | 0);
   const relief = (depthState.relief == null) ? 1 : Math.max(0, Math.min(1, depthState.relief));
   const prof = depthState.profile || null;
   const DX = w, DY = h, DZ = depth;
+  _assertVoxelBudget(DX, DY, DZ);
   const grid = new Int16Array(DX * DY * DZ).fill(-1);
   let voxels = 0;
   for (let py = 0; py < h; py++) {
@@ -578,7 +795,7 @@ function buildGrid(quant, depthState) {
       if (ci < 0) continue;
       const dz = depthSpanAt(i, depth, prof, relief);
       const gx = px, gy = (h - 1 - py); // flip so up is +Y
-      const z0 = (DZ - dz) >> 1;         // centrado en Z (relieve por ambas caras)
+      const z0 = _depthStart(DZ, dz, depthState.mode, depthState.frontRatio);
       for (let z = z0; z < z0 + dz; z++) {
         grid[gx + DX * (gy + DY * z)] = ci;
         voxels++;
@@ -602,7 +819,7 @@ function unitFace(x, y, z, dir, color) {
   return { corners: F.c, normal: F.n, color };
 }
 
-function naiveFaces(grid, dims) {
+function naiveFaces(grid, dims, colorAtFace) {
   const [DX, DY, DZ] = dims;
   const get = (x, y, z) => (x < 0 || y < 0 || z < 0 || x >= DX || y >= DY || z >= DZ) ? -1 : grid[x + DX * (y + DY * z)];
   const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -611,13 +828,13 @@ function naiveFaces(grid, dims) {
     const c = get(x, y, z); if (c < 0) continue;
     for (let d = 0; d < 6; d++) {
       const [nx, ny, nz] = dirs[d];
-      if (get(x + nx, y + ny, z + nz) < 0) faces.push(unitFace(x, y, z, d, c));
+      if (get(x + nx, y + ny, z + nz) < 0) faces.push(unitFace(x, y, z, d, colorAtFace ? colorAtFace(x, y, z, d, c) : c));
     }
   }
   return faces;
 }
 
-function greedyFaces(grid, dims) {
+function greedyFaces(grid, dims, colorAtFace) {
   const get = (x, y, z) => (x < 0 || y < 0 || z < 0 || x >= dims[0] || y >= dims[1] || z >= dims[2]) ? -1 : grid[x + dims[0] * (y + dims[1] * z)];
   const faces = [];
   const same = (a, b) => a && b && a.color === b.color && a.dir === b.dir;
@@ -631,8 +848,8 @@ function greedyFaces(grid, dims) {
         for (x[u] = 0; x[u] < dims[u]; x[u]++, n++) {
           const a = x[d] >= 0 ? get(x[0], x[1], x[2]) : -1;
           const b = x[d] < dims[d] - 1 ? get(x[0] + q[0], x[1] + q[1], x[2] + q[2]) : -1;
-          if (a >= 0 && b < 0) mask[n] = { color: a, dir: 1 };
-          else if (b >= 0 && a < 0) mask[n] = { color: b, dir: -1 };
+          if (a >= 0 && b < 0) mask[n] = { color: colorAtFace ? colorAtFace(x[0], x[1], x[2], d * 2, a) : a, dir: 1 };
+          else if (b >= 0 && a < 0) mask[n] = { color: colorAtFace ? colorAtFace(x[0] + q[0], x[1] + q[1], x[2] + q[2], d * 2 + 1, b) : b, dir: -1 };
           else mask[n] = null;
         }
       }
@@ -675,20 +892,50 @@ function greedyFaces(grid, dims) {
 // Intersecta las siluetas de frontal + perfil (+ cenital) para dar
 // profundidad real. Color desde la frontal.
 function _maskFrom(px, alpha) {
+  validatePixels(px, 'view');
   const m = new Uint8Array(px.w * px.h);
-  for (let i = 0; i < px.w * px.h; i++) m[i] = px.data[i * 4 + 3] >= alpha ? 1 : 0;
+  for (let i = 0; i < px.w * px.h; i++) m[i] = px.data[i * 4 + 3] > alpha ? 1 : 0;
   return m;
 }
-function _resampleMask(src, sw, sh, dw, dh) {
+function _sampleScalar(src, sw, sh, x, y, mode) {
+  if (mode === 'bilinear') {
+    const fx = x - 0.5, fy = y - 0.5;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
+    const at = (xx, yy) => (xx < 0 || yy < 0 || xx >= sw || yy >= sh) ? 0 : src[xx + sw * yy];
+    return at(x0, y0) * (1 - tx) * (1 - ty) + at(x0 + 1, y0) * tx * (1 - ty)
+      + at(x0, y0 + 1) * (1 - tx) * ty + at(x0 + 1, y0 + 1) * tx * ty;
+  }
+  const sx = Math.floor(x), sy = Math.floor(y);
+  return (sx < 0 || sy < 0 || sx >= sw || sy >= sh) ? 0 : src[sx + sw * sy];
+}
+function _resampleScalar(src, sw, sh, dw, dh, mode) {
   if (sw === dw && sh === dh) return src;
-  const out = new Uint8Array(dw * dh);
+  const out = new Float32Array(dw * dh);
   for (let y = 0; y < dh; y++) {
-    const sy = Math.min(sh - 1, Math.floor(y * sh / dh));
     for (let x = 0; x < dw; x++) {
-      const sx = Math.min(sw - 1, Math.floor(x * sw / dw));
-      out[x + dw * y] = src[sx + sw * sy];
+      if (mode === 'area' && (dw < sw || dh < sh)) {
+        const sx0 = x * sw / dw, sx1 = (x + 1) * sw / dw;
+        const sy0 = y * sh / dh, sy1 = (y + 1) * sh / dh;
+        let sum = 0, weight = 0;
+        for (let sy = Math.floor(sy0); sy < Math.ceil(sy1); sy++) for (let sx = Math.floor(sx0); sx < Math.ceil(sx1); sx++) {
+          if (sx < 0 || sy < 0 || sx >= sw || sy >= sh) continue;
+          const wx = Math.max(0, Math.min(sx1, sx + 1) - Math.max(sx0, sx));
+          const wy = Math.max(0, Math.min(sy1, sy + 1) - Math.max(sy0, sy));
+          sum += src[sx + sw * sy] * wx * wy; weight += wx * wy;
+        }
+        out[x + dw * y] = weight ? sum / weight : 0;
+      } else {
+        out[x + dw * y] = _sampleScalar(src, sw, sh, (x + 0.5) * sw / dw, (y + 0.5) * sh / dh, mode);
+      }
     }
   }
+  return out;
+}
+function _resampleMask(src, sw, sh, dw, dh, mode) {
+  const values = _resampleScalar(src, sw, sh, dw, dh, mode || 'nearest');
+  if (values instanceof Uint8Array) return values;
+  const out = new Uint8Array(dw * dh);
+  for (let i = 0; i < out.length; i++) out[i] = values[i] >= 0.5 ? 1 : 0;
   return out;
 }
 function _maskBounds(mask, w, h) {
@@ -718,10 +965,10 @@ function _sampleMaskNearest(src, sw, sh, x, y) {
   if (sx < 0 || sy < 0 || sx >= sw || sy >= sh) return 0;
   return src[sx + sw * sy] ? 1 : 0;
 }
-function _transformMask(src, sw, sh, dw, dh, transform) {
-  const bounds = transform.autoFit ? _maskBounds(src, sw, sh) : null;
+function _transformScalar(src, sw, sh, dw, dh, transform, mode, regionOverride) {
+  const bounds = transform.autoFit ? (regionOverride || _maskBounds(src, sw, sh)) : null;
   if (!bounds && transform.autoFit) return {
-    mask: new Uint8Array(dw * dh),
+    values: new Float32Array(dw * dh),
     bounds: null,
     sourceBounds: null,
     transform,
@@ -734,15 +981,15 @@ function _transformMask(src, sw, sh, dw, dh, transform) {
     && transform.rotation === 0
     && !transform.flipX;
   if (identity) {
-    const mask = _resampleMask(src, sw, sh, dw, dh);
+    const values = _resampleScalar(src, sw, sh, dw, dh, mode);
     return {
-      mask,
-      bounds: _maskBounds(mask, dw, dh),
+      values,
+      bounds: null,
       sourceBounds: _maskBounds(src, sw, sh),
       transform,
     };
   }
-  const out = new Uint8Array(dw * dh);
+  const out = new Float32Array(dw * dh);
   const radians = transform.rotation * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -760,27 +1007,78 @@ function _transformMask(src, sw, sh, dw, dh, transform) {
       const ny = (ry / scale) + halfH;
       const sx = region.minX + (nx / dw) * region.width;
       const sy = region.minY + (ny / dh) * region.height;
-      out[x + dw * y] = _sampleMaskNearest(src, sw, sh, sx, sy);
+      out[x + dw * y] = _sampleScalar(src, sw, sh, sx, sy, mode);
     }
   }
   return {
-    mask: out,
-    bounds: _maskBounds(out, dw, dh),
+    values: out,
+    bounds: null,
     sourceBounds: _maskBounds(src, sw, sh),
     transform,
   };
 }
-function _prepareViewMask(view, alpha, dw, dh, transform) {
-  if (!view) return null;
-  const baseMask = _maskFrom(view, alpha);
-  return _transformMask(baseMask, view.w, view.h, dw, dh, transform);
+function _transformMask(src, sw, sh, dw, dh, transform, mode) {
+  const result = _transformScalar(src, sw, sh, dw, dh, transform, mode || 'nearest');
+  const mask = new Uint8Array(dw * dh);
+  for (let i = 0; i < mask.length; i++) mask[i] = result.values[i] >= 0.5 ? 1 : 0;
+  result.mask = mask;
+  result.bounds = _maskBounds(mask, dw, dh);
+  delete result.values;
+  return result;
 }
-function createDepthState(quant, config) {
+function _prepareViewMask(view, alpha, dw, dh, transform, silhouette) {
+  if (!view) return null;
+  const baseMask = _preprocessMask(_maskFrom(view, alpha), view.w, view.h, silhouette);
+  const result = _transformMask(baseMask, view.w, view.h, dw, dh, transform, silhouette.resampling);
+  const sourceConfidence = new Float32Array(view.w * view.h);
+  const insideSq = silhouette.feather > 0 ? _edtSq(baseMask, view.w, view.h) : null;
+  const featherRadius = silhouette.feather * Math.max(1, Math.min(view.w, view.h));
+  for (let i = 0; i < sourceConfidence.length; i++) {
+    const a = view.data[i * 4 + 3];
+    const raw = a > alpha ? (a - alpha) / Math.max(1, 255 - alpha) : 0;
+    const spatial = insideSq ? Math.min(1, Math.sqrt(insideSq[i]) / Math.max(0.001, featherRadius)) : 1;
+    sourceConfidence[i] = baseMask[i] ? (silhouette.feather > 0 ? raw * spatial : 1) : 0;
+  }
+  result.confidenceMap = _transformScalar(sourceConfidence, view.w, view.h, dw, dh, transform, silhouette.resampling, result.sourceBounds).values;
+  const colors = new Uint8Array(dw * dh * 3);
+  for (let channel = 0; channel < 3; channel++) {
+    const source = new Float32Array(view.w * view.h);
+    for (let i = 0; i < source.length; i++) source[i] = view.data[i * 4 + channel];
+    const sampled = _transformScalar(source, view.w, view.h, dw, dh, transform, silhouette.resampling, result.sourceBounds).values;
+    for (let i = 0; i < sampled.length; i++) colors[i * 3 + channel] = Math.round(Math.max(0, Math.min(255, sampled[i])));
+  }
+  result.colors = colors;
+  return result;
+}
+
+function _depthMapProfile(depthMap, quant, config) {
+  if (!depthMap) return null;
+  validatePixels(depthMap, 'depthMap');
+  const values = new Float32Array(depthMap.w * depthMap.h);
+  for (let i = 0; i < values.length; i++) {
+    const r = depthMap.data[i * 4], g = depthMap.data[i * 4 + 1], b = depthMap.data[i * 4 + 2];
+    values[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  }
+  const sampled = _resampleScalar(values, depthMap.w, depthMap.h, quant.w, quant.h, config.silhouette.resampling);
+  const out = new Float32Array(quant.w * quant.h);
+  for (let i = 0; i < out.length; i++) if (quant.idxAt[i] >= 0) {
+    const v = config.depth.invertDepthMap ? 1 - sampled[i] : sampled[i];
+    out[i] = Math.max(0, Math.min(1, 1 + config.depth.depthMapStrength * (v - 1)));
+  }
+  return out;
+}
+
+function createDepthState(quant, config, viewInputs) {
   const opts = legacyOptionsFromConfig(config);
+  const depthView = (viewInputs || []).find(view => view.valid && view.role === 'depthmap');
+  const depthMapProfile = config.depth.mode === 'depthmap' ? _depthMapProfile(depthView && depthView.pixels, quant, config) : null;
   return {
     layers: Math.max(1, opts.depth | 0),
     relief: (opts.relief == null) ? 1 : Math.max(0, Math.min(1, opts.relief)),
-    profile: opts.depthMode === 'uniform' ? null : depthProfile(quant, opts.depthMode, opts),
+    profile: depthMapProfile || (opts.depthMode === 'uniform' ? null : depthProfile(quant, opts.depthMode, opts)),
+    mode: config.depth.mode,
+    frontRatio: config.depth.frontRatio,
+    depthMapMissing: config.depth.mode === 'depthmap' && !depthMapProfile,
     options: opts,
   };
 }
@@ -788,86 +1086,215 @@ function transformViewPixels(view, transform) {
   if (!view) return null;
   return { pixels: view, transform: _normalizeViewTransform(transform) };
 }
-function transformViews(views, config) {
-  const source = views || {};
-  const autoFit = !!(config.alignment && config.alignment.autoFit);
-  const sideTransform = _normalizeViewTransform(config.alignment.side);
-  const topTransform = _normalizeViewTransform(config.alignment.top);
-  if (autoFit) {
-    sideTransform.autoFit = true;
-    topTransform.autoFit = true;
+function normalizeViewInputs(views, config) {
+  const source = views || {}, inputs = [];
+  if (Array.isArray(source.views)) inputs.push(...source.views);
+  if (source.side && !inputs.some(view => view && view.role === 'side')) inputs.push({ role: 'side', pixels: source.side });
+  if (source.top && !inputs.some(view => view && view.role === 'top')) inputs.push({ role: 'top', pixels: source.top });
+  if (source.depthMap && !inputs.some(view => view && view.role === 'depthmap')) inputs.push({ role: 'depthmap', pixels: source.depthMap });
+  const seenIds = new Set();
+  return inputs.map((input, index) => {
+    if (!_isObject(input)) return { id: `view-${index}`, role: '', valid: false, issues: [{ code: 'MALFORMED_VIEW', message: 'View descriptor must be an object.' }] };
+    const descriptor = input;
+    const role = typeof descriptor.role === 'string' ? descriptor.role.toLowerCase() : '';
+    let id = typeof descriptor.id === 'string' && descriptor.id.trim() ? descriptor.id.trim() : `${role || 'view'}-${index}`;
+    if (seenIds.has(id)) id = `${id}-${index}`;
+    seenIds.add(id);
+    const issues = [];
+    const frameIndex = Math.max(0, source.frame | 0);
+    const selectedPixels = Array.isArray(descriptor.frames)
+      ? descriptor.frames[Math.min(frameIndex, Math.max(0, descriptor.frames.length - 1))] : descriptor.pixels;
+    let pixels = null;
+    if (!selectedPixels) issues.push({ code: 'MISSING_VIEW_PIXELS', message: 'View has no pixels for the selected frame.' });
+    else {
+      try { pixels = validatePixels(selectedPixels, `views[${index}]`); }
+      catch (error) { issues.push({ code: error.code || 'INVALID_VIEW_PIXELS', message: error.message }); }
+    }
+    const configured = (role === 'side' || role === 'top') ? config.alignment[role] : {};
+    const canonical = CANONICAL_ORIENTATIONS[role] || null;
+    const orientation = descriptor.orientation == null ? canonical : descriptor.orientation;
+    if (!canonical) issues.push({ code: 'UNSUPPORTED_VIEW_ROLE', message: `View role "${role || '(missing)'}" has no calibrated projector.` });
+    else if (!_isObject(orientation) || orientation.projection !== canonical.projection
+      || orientation.horizontal !== canonical.horizontal || orientation.vertical !== canonical.vertical) {
+      issues.push({ code: 'UNSUPPORTED_ORIENTATION', message: `View ${id} must use ${canonical.projection} ${canonical.horizontal}/${canonical.vertical}.` });
+    }
+    const landmarks = [];
+    if (descriptor.landmarks != null && !Array.isArray(descriptor.landmarks)) {
+      issues.push({ code: 'INVALID_LANDMARK', message: 'Landmarks must be an array of source/target point pairs.' });
+    } else for (const mark of descriptor.landmarks || []) {
+      const validPoint = point => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite);
+      if (mark && validPoint(mark.source) && validPoint(mark.target)) landmarks.push({ source: [...mark.source], target: [...mark.target] });
+      else issues.push({ code: 'INVALID_LANDMARK', message: 'Ignored a malformed landmark.' });
+    }
+    return {
+      role,
+      pixels,
+      transform: _normalizeViewTransform({ ...configured, ...(descriptor.transform || {}) }),
+      confidence: _clampNumber(descriptor.confidence, 0, 1, 1),
+      orientation,
+      id,
+      landmarks,
+      issues,
+      valid: !!pixels && !!canonical && !issues.some(issue => issue.code === 'UNSUPPORTED_ORIENTATION'),
+    };
+  });
+}
+function _assertAuxiliaryBudgets(inputs, silhouette) {
+  if (inputs.length > MAX_VIEW_COUNT) throw _budgetError('VIEW_COUNT_BUDGET_EXCEEDED', `A reconstruction accepts at most ${MAX_VIEW_COUNT} auxiliary views`);
+  let pixels = 0, bytes = 0, morphologyWork = 0;
+  for (const input of inputs) {
+    if (!input.pixels) continue;
+    const count = input.pixels.w * input.pixels.h;
+    pixels += count;
+    bytes += input.pixels.data.byteLength;
+    if (input.role === 'side' || input.role === 'top') {
+      const work = _morphWork(input.pixels.w, input.pixels.h, silhouette);
+      if (work > MAX_MORPH_WORK) throw _budgetError('AUX_MORPH_BUDGET_EXCEEDED', `View ${input.id} exceeds the ${MAX_MORPH_WORK}-operation morphology budget`);
+      morphologyWork += work;
+    }
   }
-  return {
-    side: transformViewPixels(source.side, sideTransform),
-    top: transformViewPixels(source.top, topTransform),
-  };
+  if (pixels > MAX_AUX_PIXEL_COUNT) throw _budgetError('AUX_PIXEL_BUDGET_EXCEEDED', `Auxiliary views exceed the cumulative ${MAX_AUX_PIXEL_COUNT}-pixel budget`);
+  if (bytes > MAX_AUX_BYTES) throw _budgetError('AUX_BYTE_BUDGET_EXCEEDED', `Auxiliary views exceed the cumulative ${MAX_AUX_BYTES}-byte input budget`);
+  if (morphologyWork > MAX_TOTAL_MORPH_WORK) throw _budgetError('AUX_MORPH_TOTAL_BUDGET_EXCEEDED', `Auxiliary views exceed the cumulative ${MAX_TOTAL_MORPH_WORK}-operation morphology budget`);
+  return { pixels, bytes, morphologyWork };
+}
+function transformViews(views, config) {
+  const inputs = normalizeViewInputs(views, config);
+  const autoFit = !!(config.alignment && config.alignment.autoFit);
+  return inputs.map(input => ({ ...input, transform: { ...input.transform, autoFit: autoFit || input.transform.autoFit } }));
 }
 function prepareSilhouettes(config, views, dims) {
   const [W, H, D] = dims;
   const alpha = config.silhouette.alphaThreshold;
   const transformed = transformViews(views, config);
-  let sideMask = null, sideRow = null, sideMeta = null;
-  if (transformed.side && transformed.side.pixels) {
-    const sidePx = transformed.side.pixels;
-    sideMeta = _prepareViewMask(sidePx, alpha, D, H, transformed.side.transform);
-    sideMask = sideMeta.mask;
-    sideRow = new Uint8Array(H);
-    for (let y = 0; y < H; y++) {
-      let any = 0;
-      for (let z = 0; z < D; z++) if (sideMask[z + D * y]) { any = 1; break; }
-      sideRow[y] = any;
-    }
+  const prepared = [];
+  for (const view of transformed) {
+    if (!view.valid || !view.pixels || (view.role !== 'side' && view.role !== 'top')) continue;
+    const dw = view.role === 'side' ? D : W, dh = view.role === 'side' ? H : D;
+    const transform = _landmarkTransform(view, dw, dh);
+    const meta = _prepareViewMask(view.pixels, alpha, dw, dh, transform, config.silhouette);
+    const inverse = new Uint8Array(meta.mask.length);
+    for (let i = 0; i < inverse.length; i++) inverse[i] = meta.mask[i] ? 0 : 1;
+    const distanceSq = _edtSq(inverse, dw, dh);
+    const edgeDistance = new Float32Array(distanceSq.length);
+    for (let i = 0; i < edgeDistance.length; i++) edgeDistance[i] = Math.sqrt(distanceSq[i]);
+    prepared.push({ ...view, transform, ...meta, edgeDistance, w: dw, h: dh });
   }
-  let topMask = null, topCol = null, topMeta = null;
-  if (transformed.top && transformed.top.pixels) {
-    const topPx = transformed.top.pixels;
-    topMeta = _prepareViewMask(topPx, alpha, W, D, transformed.top.transform);
-    topMask = topMeta.mask;
-    topCol = new Uint8Array(W);
-    for (let x = 0; x < W; x++) {
-      let any = 0;
-      for (let z = 0; z < D; z++) if (topMask[x + W * z]) { any = 1; break; }
-      topCol[x] = any;
-    }
-  }
+  const side = prepared.find(view => view.role === 'side') || null;
+  const top = prepared.find(view => view.role === 'top') || null;
+  const byId = Object.create(null);
+  for (const view of prepared) byId[view.id] = { id: view.id, role: view.role, w: view.w, h: view.h, mask: view.mask, bounds: view.bounds, sourceBounds: view.sourceBounds, transform: view.transform };
   return {
-    sideMask,
-    sideRow,
-    topMask,
-    topCol,
+    prepared,
+    sideMask: side && side.mask,
+    sideRow: side ? _projectAxis(side.mask, side.w, side.h, 'row') : null,
+    topMask: top && top.mask,
+    topCol: top ? _projectAxis(top.mask, top.w, top.h, 'col') : null,
     transformed,
     previews: {
-      side: sideMeta ? { w: D, h: H, mask: sideMeta.mask, bounds: sideMeta.bounds, sourceBounds: sideMeta.sourceBounds, transform: sideMeta.transform } : null,
-      top: topMeta ? { w: W, h: D, mask: topMeta.mask, bounds: topMeta.bounds, sourceBounds: topMeta.sourceBounds, transform: topMeta.transform } : null,
+      byId,
+      side: side ? byId[side.id] : null,
+      top: top ? byId[top.id] : null,
     },
   };
 }
-function buildHull(quant, depthState, silhouettes) {
+function _landmarkTransform(view, dw, dh) {
+  const marks = view.landmarks || [];
+  if (!marks.length) return view.transform;
+  const sourcePoint = mark => [(mark.source[0] / view.pixels.w) * dw, (mark.source[1] / view.pixels.h) * dh];
+  const targetPoint = mark => mark.target;
+  const transform = { ...view.transform, autoFit: false };
+  if (marks.length >= 2) {
+    const a = sourcePoint(marks[0]), b = sourcePoint(marks[1]), ta = targetPoint(marks[0]), tb = targetPoint(marks[1]);
+    const sdx = b[0] - a[0], sdy = b[1] - a[1];
+    const tdx = tb[0] - ta[0], tdy = tb[1] - ta[1];
+    const reflectedTargetX = view.transform.flipX ? -tdx : tdx;
+    const sd = Math.hypot(sdx, sdy) || 1, td = Math.hypot(tdx, tdy);
+    transform.scale = Math.max(0.1, Math.min(8, td / sd));
+    transform.rotation = (Math.atan2(tdy, reflectedTargetX) - Math.atan2(sdy, sdx)) * 180 / Math.PI;
+  }
+  const p = sourcePoint(marks[0]), t = targetPoint(marks[0]);
+  transform.offsetX = 0; transform.offsetY = 0;
+  const mapped = _forwardTransformPoint(p, dw, dh, transform);
+  transform.offsetX = t[0] - mapped[0]; transform.offsetY = t[1] - mapped[1];
+  return transform;
+}
+function _forwardTransformPoint(point, dw, dh, transform) {
+  const cx = dw / 2, cy = dh / 2, radians = transform.rotation * Math.PI / 180;
+  const sx = (point[0] - cx) * transform.scale, sy = (point[1] - cy) * transform.scale;
+  let rx = sx * Math.cos(radians) - sy * Math.sin(radians);
+  const ry = sx * Math.sin(radians) + sy * Math.cos(radians);
+  if (transform.flipX) rx = -rx;
+  return [cx + rx + transform.offsetX, cy + ry + transform.offsetY];
+}
+function _projectAxis(mask, w, h, direction) {
+  const out = new Uint8Array(direction === 'row' ? h : w);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[x + w * y]) out[direction === 'row' ? y : x] = 1;
+  return out;
+}
+function _viewSample(view, x, py, z) {
+  return view.role === 'side' ? z + view.w * py : x + view.w * z;
+}
+function _viewWeight(view, config) {
+  const roleWeight = view.role === 'side' ? config.reconstruction.sideWeight : config.reconstruction.topWeight;
+  return roleWeight * view.confidence;
+}
+function _viewConfidenceAt(view, sample, edgeTolerance) {
+  if (view.mask[sample]) return view.confidenceMap[sample];
+  if (edgeTolerance <= 0) return 0;
+  const radius = Math.max(0.001, edgeTolerance * Math.max(1, Math.min(view.w, view.h)));
+  const distance = view.edgeDistance[sample];
+  return distance <= radius ? Math.max(0, 1 - distance / (radius + 0.001)) : 0;
+}
+function _nearestFrontColors(quant) {
+  const { w, h, idxAt } = quant, nearest = new Int16Array(idxAt), queue = new Int32Array(w * h);
+  let head = 0, tail = 0;
+  for (let i = 0; i < nearest.length; i++) if (nearest[i] >= 0) queue[tail++] = i;
+  while (head < tail) {
+    const i = queue[head++], x = i % w, y = (i / w) | 0;
+    const next = [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1];
+    for (const n of next) if (n >= 0 && nearest[n] < 0) { nearest[n] = nearest[i]; queue[tail++] = n; }
+  }
+  return nearest;
+}
+function buildHull(quant, depthState, silhouettes, config) {
   const { idxAt, w: W, h: H } = quant;
   const D = Math.max(1, depthState.layers | 0);
   const relief = (depthState.relief == null) ? 1 : Math.max(0, Math.min(1, depthState.relief));
   const prof = depthState.profile || null;
-  const sideMask = silhouettes.sideMask;
-  const sideRow = silhouettes.sideRow;
-  const topMask = silhouettes.topMask;
-  const topCol = silhouettes.topCol;
-
+  _assertVoxelBudget(W, H, D);
   const grid = new Int16Array(W * H * D).fill(-1);
+  const totalEffectiveWeight = config.reconstruction.frontWeight
+    + silhouettes.prepared.reduce((sum, view) => sum + _viewWeight(view, config), 0);
+  if (config.reconstruction.mode === 'weighted' && totalEffectiveWeight <= 0) {
+    return { grid, dims: [W, H, D], voxels: 0, zeroTotalWeight: true };
+  }
+  const nearestColors = config.reconstruction.hardFrontConstraint ? null : _nearestFrontColors(quant);
   let voxels = 0;
   for (let py = 0; py < H; py++) {
     for (let px = 0; px < W; px++) {
       const i = px + W * py;
-      const ci = idxAt[i];
-      if (ci < 0) continue;
-      if (sideMask && sideRow[py] === 0) continue;
-      if (topMask && topCol[px] === 0) continue;
-      const dz = depthSpanAt(i, D, prof, relief);
-      const z0 = (D - dz) >> 1;
+      const frontColor = idxAt[i], ci = frontColor >= 0 ? frontColor : (nearestColors && nearestColors[i]);
+      if (ci == null || ci < 0 || (frontColor < 0 && (config.reconstruction.mode === 'strict' || config.reconstruction.hardFrontConstraint))) continue;
+      const dz = frontColor >= 0 ? depthSpanAt(i, D, prof, relief) : D;
+      const z0 = _depthStart(D, dz, depthState.mode, depthState.frontRatio);
       const z1 = z0 + dz;
       const my = H - 1 - py;
       for (let z = z0; z < z1; z++) {
-        if (sideMask && sideRow[py] && sideMask[z + D * py] !== 1) continue;
-        if (topMask && topCol[px] && topMask[px + W * z] !== 1) continue;
+        let accepted = true;
+        if (config.reconstruction.mode === 'strict') {
+          for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
+        } else {
+          let score = frontColor >= 0 ? config.reconstruction.frontWeight : 0, total = config.reconstruction.frontWeight;
+          for (const view of silhouettes.prepared) {
+            const weight = _viewWeight(view, config), sample = _viewSample(view, px, py, z);
+            total += weight; score += weight * _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
+          }
+          const threshold = config.reconstruction.threshold <= 1
+            ? config.reconstruction.threshold * total : config.reconstruction.threshold;
+          accepted = score >= threshold;
+        }
+        if (!accepted) continue;
         grid[px + W * (my + H * z)] = ci; voxels++;
       }
     }
@@ -875,23 +1302,173 @@ function buildHull(quant, depthState, silhouettes) {
   return { grid, dims: [W, H, D], voxels };
 }
 function calculateOccupancy(quant, config, silhouettes, depthState) {
-  const useHull = !!(silhouettes.sideMask || silhouettes.topMask);
-  return useHull ? buildHull(quant, depthState, silhouettes) : buildGrid(quant, depthState);
+  const useHull = silhouettes.prepared.length > 0 || config.reconstruction.mode === 'weighted';
+  return useHull ? buildHull(quant, depthState, silhouettes, config) : buildGrid(quant, depthState);
 }
-function extractMesh(grid, dims, config) {
-  const opts = legacyOptionsFromConfig(config);
-  const greedy = greedyFaces(grid, dims);
-  let naiveCount = 0;
+
+function _isExposed(grid, dims, x, y, z, dx, dy, dz) {
+  const nx = x + dx, ny = y + dy, nz = z + dz;
+  return nx < 0 || ny < 0 || nz < 0 || nx >= dims[0] || ny >= dims[1] || nz >= dims[2]
+    || grid[nx + dims[0] * (ny + dims[1] * nz)] < 0;
+}
+function fuseVoxelColors(occupancy, quant, silhouettes, config) {
+  const sourceGrid = occupancy.grid, dims = occupancy.dims;
+  const sideViews = silhouettes.prepared.filter(view => view.role === 'side');
+  const topViews = silhouettes.prepared.filter(view => view.role === 'top');
+  const usableAuxiliary = sideViews.concat(topViews).some(view => view.confidence > 0 && !!view.bounds);
+  const effectiveSide = config.color.mode === 'auxiliary' && usableAuxiliary ? 'auxiliary' : config.color.side;
+  const effectiveBack = config.color.back;
+  const [W, H, D] = dims;
+  const palette = quant.palette.map(color => [...color]);
+  const colorKeys = new Map(palette.map((color, index) => [color.join(','), index]));
+  const maxColors = Math.max(1, config.palette.colors | 0);
+  const internColor = rgb => {
+    const color = rgb.map(value => Math.max(0, Math.min(255, Math.round(value))));
+    const key = color.join(',');
+    if (colorKeys.has(key)) return colorKeys.get(key);
+    if (palette.length < maxColors) {
+      const index = palette.length; palette.push(color); colorKeys.set(key, index); return index;
+    }
+    let nearest = 0, nearestDistance = Infinity;
+    for (let index = 0; index < palette.length; index++) {
+      const candidate = palette[index], dr = color[0] - candidate[0], dg = color[1] - candidate[1], db = color[2] - candidate[2];
+      const distance = dr * dr + dg * dg + db * db;
+      if (distance < nearestDistance) { nearestDistance = distance; nearest = index; }
+    }
+    return nearest;
+  };
+  const darken = rgb => rgb.map(value => Math.round(value * config.color.darken));
+  const auxiliaryColor = (views, sample) => {
+    let total = 0, r = 0, g = 0, b = 0;
+    for (const view of views) {
+      const weight = _viewWeight(view, config) * view.confidenceMap[sample];
+      if (weight <= 0) continue;
+      total += weight;
+      r += view.colors[sample * 3] * weight;
+      g += view.colors[sample * 3 + 1] * weight;
+      b += view.colors[sample * 3 + 2] * weight;
+    }
+    return total ? [r / total, g / total, b / total] : null;
+  };
+  const faceRgb = (x, y, z, dir, baseIndex) => {
+    const base = quant.palette[baseIndex] || [200, 200, 200];
+    if (dir === 4) return base;
+    if (dir === 5) return effectiveBack === 'darken' ? darken(base) : base;
+    const py = H - 1 - y;
+    if (effectiveSide === 'auxiliary') {
+      const auxiliary = dir <= 1
+        ? auxiliaryColor(sideViews, z + D * py)
+        : auxiliaryColor(topViews, x + W * z);
+      if (auxiliary) return auxiliary;
+    }
+    return effectiveSide === 'darken' ? darken(base) : base;
+  };
+  const faceColorAt = (x, y, z, dir) => {
+    const baseIndex = sourceGrid[x + W * (y + H * z)];
+    return internColor(faceRgb(x, y, z, dir, baseIndex));
+  };
+
+  // Populate the bounded surface palette before deriving the deliberately lossy
+  // per-voxel VOX color. Preview and OBJ retain these face-specific indices.
+  const directions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const gi = x + W * (y + H * z), ci = sourceGrid[gi];
+    if (ci < 0) continue;
+    for (let dir = 0; dir < 6; dir++) {
+      const delta = directions[dir];
+      if (_isExposed(sourceGrid, dims, x, y, z, delta[0], delta[1], delta[2])) faceColorAt(x, y, z, dir, ci);
+    }
+  }
+
+  const grid = new Int16Array(sourceGrid);
+  for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const gi = x + W * (y + H * z), ci = sourceGrid[gi];
+    if (ci < 0) continue;
+    const exposedColors = [];
+    for (let dir = 0; dir < 6; dir++) {
+      const delta = directions[dir];
+      if (_isExposed(sourceGrid, dims, x, y, z, delta[0], delta[1], delta[2])) exposedColors.push(faceRgb(x, y, z, dir, ci));
+    }
+    const colors = exposedColors.length ? exposedColors : [quant.palette[ci] || [200, 200, 200]];
+    const rgb = [0, 1, 2].map(channel => colors.reduce((sum, color) => sum + color[channel], 0) / colors.length);
+    grid[gi] = internColor(rgb);
+  }
+  return { grid, palette, faceColorAt, voxelColorPolicy: 'mean-of-exposed-face-colors' };
+}
+
+function _iou(a, b) {
+  let intersection = 0, union = 0, mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] || b[i]) union++;
+    if (a[i] && b[i]) intersection++;
+    if (!!a[i] !== !!b[i]) mismatch++;
+  }
+  return { iou: union ? intersection / union : 1, residual: union ? mismatch / union : 0 };
+}
+function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, occupancy) {
+  const warnings = [], views = [];
+  const frontMask = new Uint8Array(quant.w * quant.h);
+  for (let i = 0; i < frontMask.length; i++) frontMask[i] = quant.idxAt[i] >= 0 ? 1 : 0;
+  if (!_maskBounds(frontMask, quant.w, quant.h)) warnings.push({ code: 'EMPTY_FRONT', stage: 'input', severity: 'error', message: 'The front silhouette is empty.' });
+  if (depthState.depthMapMissing) warnings.push({ code: 'DEPTH_MAP_MISSING', stage: 'input', severity: 'warning', view: 'depthmap', message: 'Depth-map mode needs a supplied depth map; the selected profile was used as fallback.' });
+  for (const input of allViews) for (const issue of input.issues || []) {
+    warnings.push({ code: issue.code, stage: 'input', severity: issue.code === 'MALFORMED_VIEW' ? 'error' : 'warning', view: input.id, message: issue.message });
+  }
+  if (occupancy && occupancy.zeroTotalWeight) warnings.push({ code: 'ZERO_TOTAL_WEIGHT', stage: 'reconstruction', severity: 'error', message: 'Weighted reconstruction has zero total effective view weight.' });
+  let occupied = 0;
+  for (let i = 0; i < grid.length; i++) if (grid[i] >= 0) occupied++;
+  if (!occupied && _maskBounds(frontMask, quant.w, quant.h)) warnings.push({ code: 'EMPTY_RECONSTRUCTION', stage: 'reconstruction', severity: 'error', message: 'The supplied silhouettes contradict each other and removed all voxels.' });
+  const frontRows = _projectAxis(frontMask, quant.w, quant.h, 'row');
+  const frontCols = _projectAxis(frontMask, quant.w, quant.h, 'col');
+  for (const view of silhouettes.prepared) {
+    const projected = new Uint8Array(view.w * view.h);
+    for (let z = 0; z < dims[2]; z++) for (let y = 0; y < dims[1]; y++) for (let x = 0; x < dims[0]; x++) {
+      if (grid[x + dims[0] * (y + dims[1] * z)] < 0) continue;
+      const py = dims[1] - 1 - y;
+      projected[_viewSample(view, x, py, z)] = 1;
+    }
+    const quality = _iou(view.mask, projected), overlay = new Uint8Array(projected.length);
+    const inputAxis = view.role === 'side' ? _projectAxis(view.mask, view.w, view.h, 'row') : _projectAxis(view.mask, view.w, view.h, 'col');
+    const frontAxis = view.role === 'side' ? frontRows : frontCols;
+    const inputOverlap = _iou(frontAxis, inputAxis).iou;
+    for (let i = 0; i < overlay.length; i++) overlay[i] = view.mask[i] ? (projected[i] ? 1 : 2) : (projected[i] ? 3 : 0);
+    const empty = !_maskBounds(view.mask, view.w, view.h);
+    if (empty) warnings.push({ code: 'EMPTY_VIEW', stage: 'input', severity: 'error', view: view.id, message: `The ${view.role} silhouette is empty.` });
+    else if (inputOverlap < 0.25) warnings.push({ code: 'LOW_SHARED_AXIS_OVERLAP', stage: 'input', severity: 'warning', view: view.id, iou: inputOverlap, message: `The ${view.role} view does not align on its shared front axis.` });
+    if (!empty && quality.iou < 0.25) warnings.push({ code: 'LOW_OVERLAP', stage: 'projection', severity: 'warning', view: view.id, iou: quality.iou, message: `The ${view.role} view has low projected overlap.` });
+    if (quality.residual > 0.75) warnings.push({ code: 'VIEW_CONFLICT', stage: 'projection', severity: 'warning', view: view.id, residual: quality.residual, message: `The ${view.role} view is the strongest reconstruction conflict.` });
+    views.push({ id: view.id, role: view.role, confidence: view.confidence, inputOverlap, iou: quality.iou, residual: quality.residual, w: view.w, h: view.h, projected, overlay });
+  }
+  return { warnings, views, hasErrors: warnings.some(w => w.severity === 'error') };
+}
+
+function _countExposedFaces(grid, dims) {
+  let count = 0;
   const [DX, DY, DZ] = dims;
   const get = (x, y, z) => (x < 0 || y < 0 || z < 0 || x >= DX || y >= DY || z >= DZ) ? -1 : grid[x + DX * (y + DY * z)];
   const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
   for (let z = 0; z < DZ; z++) for (let y = 0; y < DY; y++) for (let x = 0; x < DX; x++) {
     if (get(x, y, z) < 0) continue;
-    for (let dd = 0; dd < 6; dd++) if (get(x + dirs[dd][0], y + dirs[dd][1], z + dirs[dd][2]) < 0) naiveCount++;
+    for (const dir of dirs) if (get(x + dir[0], y + dir[1], z + dir[2]) < 0) count++;
   }
+  return count;
+}
+function _assertFaceBudget(exposedFaces, greedy) {
+  const listMultiplier = greedy ? 1 : 2;
+  const estimatedBytes = exposedFaces * FACE_OBJECT_ESTIMATE_BYTES * listMultiplier;
+  if (exposedFaces > MAX_EXPOSED_FACES || estimatedBytes > MAX_FACE_ALLOCATION_BYTES) {
+    throw _budgetError('FACE_BUDGET_EXCEEDED', `Surface has ${exposedFaces} exposed unit faces; estimated face allocation ${estimatedBytes} bytes exceeds the safe mesh budget`);
+  }
+  return estimatedBytes;
+}
+function extractMesh(grid, dims, config, colorAtFace, exposedFaceCount) {
+  const opts = legacyOptionsFromConfig(config);
+  const naiveCount = exposedFaceCount == null ? _countExposedFaces(grid, dims) : exposedFaceCount;
+  _assertFaceBudget(naiveCount, opts.greedy);
+  const greedy = greedyFaces(grid, dims, colorAtFace);
   return {
     greedyFacesList: greedy,
-    naiveFacesList: opts.greedy ? null : naiveFaces(grid, dims),
+    naiveFacesList: opts.greedy ? null : naiveFaces(grid, dims, colorAtFace),
     naiveCount,
   };
 }
@@ -902,12 +1479,35 @@ function voxelize(pixels, opts, views) {
   const totalStart = _nowMs();
   views = views || {};
   const config = _measureStage(stageMs, 'normalizeConfig', () => normalizeConfig(opts));
-  const quant = _measureStage(stageMs, 'prepareFront', () => quantize(pixels, config.silhouette.alphaThreshold, config.palette.colors));
-  const depthState = _measureStage(stageMs, 'prepareDepth', () => createDepthState(quant, config));
-  const silhouettes = _measureStage(stageMs, 'prepareSilhouettes', () => prepareSilhouettes(config, views, [quant.w, quant.h, depthState.layers]));
-  const { grid, dims, voxels } = _measureStage(stageMs, 'calculateOccupancy', () => calculateOccupancy(quant, config, silhouettes, depthState));
-  const mesh = _measureStage(stageMs, 'extractMesh', () => extractMesh(grid, dims, config));
+  const validatedFront = _measureStage(stageMs, 'validateInput', () => {
+    const valid = validatePixels(pixels, 'front');
+    _assertVoxelBudget(valid.w, valid.h, config.depth.layers);
+    return valid;
+  });
+  const frontPixels = _measureStage(stageMs, 'preprocessFront', () => preprocessPixels(validatedFront, config.silhouette));
+  const quant = _measureStage(stageMs, 'prepareFront', () => quantize(frontPixels, config.silhouette.alphaThreshold, config.palette.colors));
+  const viewInputs = _measureStage(stageMs, 'normalizeViews', () => normalizeViewInputs(views, config));
+  _measureStage(stageMs, 'validateViewBudgets', () => _assertAuxiliaryBudgets(viewInputs, config.silhouette));
+  const depthState = _measureStage(stageMs, 'prepareDepth', () => createDepthState(quant, config, viewInputs));
+  const silhouettes = _measureStage(stageMs, 'prepareSilhouettes', () => prepareSilhouettes(config, { views: viewInputs }, [quant.w, quant.h, depthState.layers]));
+  const occupancy = _measureStage(stageMs, 'calculateOccupancy', () => calculateOccupancy(quant, config, silhouettes, depthState));
+  if (occupancy.voxels > MAX_MESH_VOXELS) throw _budgetError('MESH_BUDGET_EXCEEDED', `Occupied volume exceeds the ${MAX_MESH_VOXELS}-voxel meshing budget`);
+  const exposedFaceCount = _measureStage(stageMs, 'validateMeshBudget', () => {
+    const count = _countExposedFaces(occupancy.grid, occupancy.dims);
+    _assertFaceBudget(count, config.mesh.greedy);
+    return count;
+  });
+  const colored = _measureStage(stageMs, 'fuseColors', () => fuseVoxelColors(occupancy, quant, silhouettes, config));
+  const { grid, dims, voxels } = { ...occupancy, grid: colored.grid };
+  const mesh = _measureStage(stageMs, 'extractMesh', () => extractMesh(grid, dims, config, colored.faceColorAt, exposedFaceCount));
+  const diagnostics = _measureStage(stageMs, 'diagnostics', () => buildDiagnostics(quant, grid, dims, silhouettes, depthState, viewInputs, occupancy));
+  for (const view of diagnostics.views) {
+    const preview = silhouettes.previews.byId[view.id];
+    if (preview) { preview.projected = view.projected; preview.overlay = view.overlay; preview.iou = view.iou; preview.residual = view.residual; }
+  }
+  const faceEstimateBytes = mesh.greedyFacesList.length * 152 + (mesh.naiveFacesList ? mesh.naiveFacesList.length * 152 : 0);
   const memoryEstimateBytes = _estimateMemoryBytes({
+    frontPixels: frontPixels.data,
     quantIdxAt: quant.idxAt,
     grid,
     depthProfile: depthState.profile,
@@ -915,12 +1515,15 @@ function voxelize(pixels, opts, views) {
     sideRow: silhouettes.sideRow,
     topMask: silhouettes.topMask,
     topCol: silhouettes.topCol,
-  });
+    viewData: silhouettes.prepared.map(view => [view.mask, view.confidenceMap, view.edgeDistance, view.colors]),
+    diagnosticData: diagnostics.views.map(view => [view.projected, view.overlay]),
+  }) + faceEstimateBytes;
   return {
     configVersion: CONFIG_VERSION,
     config,
     legacyOptions: legacyOptionsFromConfig(config),
-    palette: quant.palette,
+    palette: colored.palette,
+    voxelColorPolicy: colored.voxelColorPolicy,
     grid,
     dims, voxels,
     greedyFacesList: mesh.greedyFacesList,
@@ -931,9 +1534,14 @@ function voxelize(pixels, opts, views) {
       totalMs: _roundMs(_nowMs() - totalStart),
       memoryEstimateBytes,
       memoryEstimateMiB: Math.round((memoryEstimateBytes / (1024 * 1024)) * 1000) / 1000,
+      faceEstimateBytes,
+      bytesPerVoxel: voxels ? Math.round(memoryEstimateBytes / voxels) : 0,
+      viewBytes: Object.assign(Object.create(null), Object.fromEntries(silhouettes.prepared.map(view => [view.id, _estimateMemoryBytes({ mask: view.mask, confidence: view.confidenceMap, distance: view.edgeDistance, colors: view.colors })]))),
     },
+    diagnostics,
     debug: {
       silhouettes: silhouettes.previews,
+      views: silhouettes.previews.byId,
     },
   };
 }
@@ -980,15 +1588,22 @@ const voxelRoot = (typeof window !== 'undefined') ? window : globalThis;
 voxelRoot.Voxel = {
   CONFIG_VERSION,
   canvasToPixels,
+  validatePixels,
+  preprocessPixels,
   createDefaultConfig,
+  migrateConfig,
   defaultLegacyOptions,
   legacyOptionsFromConfig,
   normalizeConfig,
   _maskBounds,
   prepareSilhouettes,
   transformViews,
+  normalizeViewInputs,
+  _landmarkTransform,
+  _forwardTransformPoint,
   createDepthState,
   calculateOccupancy,
+  extractMesh,
   voxelize,
   annotateAO,
 };

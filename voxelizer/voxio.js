@@ -92,6 +92,22 @@
     if (Math.max(DX, DY, DZ) > 256)
       throw new Error(`MagicaVoxel limita a 256^3 (modelo ${DX}x${DY}x${DZ})`);
     const grid = result.grid, pal = result.palette;
+    const colorIndexByKey = new Map(), exportColors = [], indexByInternal = new Map();
+    for (let i = 0; i < grid.length; i++) {
+      const ci = grid[i];
+      if (ci < 0 || indexByInternal.has(ci)) continue;
+      const color = pal[ci];
+      if (!color) throw new Error(`Missing palette color ${ci}`);
+      const key = `${color[0] & 255},${color[1] & 255},${color[2] & 255}`;
+      let exportIndex = colorIndexByKey.get(key);
+      if (exportIndex == null) {
+        if (exportColors.length >= 255) throw new Error('VOX supports at most 255 distinct used colors');
+        exportColors.push(color);
+        exportIndex = exportColors.length; // 1-based, zero is reserved
+        colorIndexByKey.set(key, exportIndex);
+      }
+      indexByInternal.set(ci, exportIndex);
+    }
 
     // voxels en orden x,y,z (igual que numpy.argwhere sobre un array (W,H,D))
     const body = [];
@@ -101,7 +117,7 @@
         for (let z = 0; z < DZ; z++) {
           const ci = grid[x + DX * (y + DY * z)];
           if (ci < 0) continue;
-          body.push(x & 255, z & 255, y & 255, (ci + 1) & 255); // Y<->Z, color 1-based
+          body.push(x & 255, z & 255, y & 255, indexByInternal.get(ci)); // Y<->Z, color 1-based
           count++;
         }
 
@@ -115,7 +131,7 @@
 
     const rgbaContent = [];
     for (let i = 0; i < 256; i++) {
-      const c = i < pal.length ? pal[i] : [0, 0, 0];
+      const c = i < exportColors.length ? exportColors[i] : [0, 0, 0];
       rgbaContent.push(c[0] & 255, c[1] & 255, c[2] & 255, 255);
     }
     const rgba = makeChunk('RGBA', rgbaContent);

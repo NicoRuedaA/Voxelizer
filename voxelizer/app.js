@@ -1,5 +1,6 @@
 /* app.js — Three.js scene + UI wiring for the Voxelizer prototype.
-   Depends on globals: THREE, THREE.OrbitControls, SAMPLE_SPRITES, Voxel, ZipUtil. */
+   Depends on globals: THREE, THREE.OrbitControls, SAMPLE_SPRITES, Voxel,
+   VoxelTransfer, VoxelBatch, VoxelWorkerChannel, VoxIO, ZipUtil. */
 (function () {
   'use strict';
 
@@ -26,13 +27,14 @@
     name: '—',
     opts: { ...defaultOpts, alignment: cloneData(defaultAlignment) },
     sheet: { c: 1, r: 1, frame: 0 },
-    views: { side: null, top: null },   // canvases opcionales para la vista actual
+    views: { side: null, top: null, depthMap: null },   // optional canvases for the active record
     showWire: false, showGrid: false, autoRotate: true,
     last: null,          // last voxelize() result
     busy: false,
     batchBusy: false,
     batchCancelRequested: false,
     batchProgress: { visible: false, done: 0, total: 0, label: 'Listo' },
+    diagnosticViewIds: {},
   };
 
   // ---------- three setup ----------
@@ -190,74 +192,26 @@
     return sliceFrameFromCanvas(state.sourceCanvas, state.sheet, state.sheet.frame);
   }
 
-  function getItemViews(rec) {
-    const views = {};
-    if (rec.side) views.side = Voxel.canvasToPixels(rec.side);
-    if (rec.top) views.top = Voxel.canvasToPixels(rec.top);
+  function getItemViews(rec, sheet = state.sheet, frame = state.sheet.frame) {
+    const views = { frame, views: [] };
+    const add = (kind, role, canvas) => {
+      if (!canvas) return;
+      const metadata = rec.viewMetadata && rec.viewMetadata[kind] ? cloneData(rec.viewMetadata[kind]) : { frameMode: 'static' };
+      const pixels = metadata.frameMode === 'sheet' ? sliceFrameFromCanvas(canvas, sheet, frame) : Voxel.canvasToPixels(canvas);
+      views.views.push({ role, pixels, confidence: 1, frameMetadata: { ...metadata, selectedFrame: frame } });
+    };
+    add('side', 'side', rec.side);
+    add('top', 'top', rec.top);
+    add('depthMap', 'depthmap', rec.depthMap);
     return views;
   }
 
   function createVoxelWorkerChannel() {
-    let worker = null;
-    let nextJobId = 0;
-    let useMainThread = (typeof Worker === 'undefined');
-    const pending = new Map();
-
-    function shutdown() {
-      if (!worker) return;
-      worker.terminate();
-      worker = null;
-    }
-
-    function ensureWorker() {
-      if (useMainThread) return null;
-      if (worker) return worker;
-      try {
-        worker = new Worker('worker.js');
-      } catch (_error) {
-        useMainThread = true;
-        shutdown();
-        return null;
-      }
-      worker.onmessage = ({ data }) => {
-        const job = pending.get(data.jobId);
-        if (!job) return;
-        pending.delete(data.jobId);
-        if (data.ok) job.resolve(data.result);
-        else job.reject(new Error(data.error || 'Fallo de voxelización en worker'));
-      };
-      worker.onerror = (event) => {
-        const jobs = [...pending.values()];
-        pending.clear();
-        shutdown();
-        const error = new Error(event.message || 'No se pudo iniciar el worker de voxelización');
-        jobs.forEach(job => job.reject(error));
-      };
-      return worker;
-    }
-
-    function run(pixels, opts, views) {
-      const activeWorker = ensureWorker();
-      if (!activeWorker) {
-        return Promise.resolve(Voxel.voxelize(pixels, opts, views || {}));
-      }
-      return new Promise((resolve, reject) => {
-        const jobId = `job-${++nextJobId}`;
-        pending.set(jobId, { resolve, reject });
-        activeWorker.postMessage({ jobId, pixels, opts, views: views || {} });
-      });
-    }
-
-    function cancelAll(reason = 'cancelled') {
-      if (!pending.size && !worker) return;
-      const jobs = [...pending.values()];
-      pending.clear();
-      shutdown();
-      const error = new Error(reason);
-      jobs.forEach(job => job.reject(error));
-    }
-
-    return { run, cancelAll };
+    return VoxelWorkerChannel.create({
+      workerUrl: 'worker.js',
+      voxelize: Voxel.voxelize,
+      transfer: VoxelTransfer,
+    });
   }
 
   const previewWorker = createVoxelWorkerChannel();
@@ -268,7 +222,7 @@
   }
 
   function cancelPreviewJob(reason = 'stale') {
-    previewWorker.cancelAll(reason);
+    previewWorker.cancelPending(reason);
   }
   function voxelizePreview(pixels, opts, views) {
     cancelPreviewJob();
@@ -290,7 +244,7 @@
     state.pixels = pixels;
     state.last = null;
     const t0 = performance.now();
-    const views = getItemViews(items.find(it => it.canvas === state.sourceCanvas) || {});
+    const views = getItemViews(items.find(it => it.canvas === state.sourceCanvas) || {}, state.sheet, state.sheet.frame);
     state.busy = true;
     refreshActionState();
     $('statMain').textContent = 'Voxelizando…';
@@ -350,6 +304,26 @@
       i.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
       sw.appendChild(i);
     });
+    const diagnostics = $('diagnostics');
+    diagnostics.replaceChildren();
+    const warnings = r.diagnostics ? r.diagnostics.warnings : [];
+    if (!warnings.length) {
+      const ok = document.createElement('p'); ok.textContent = 'Silhouettes are consistent with the reconstructed projections.'; diagnostics.appendChild(ok);
+    } else {
+      warnings.forEach(warning => {
+        const line = document.createElement('p');
+        line.className = warning.severity || 'warning';
+        line.textContent = `${warning.stage || 'diagnostic'} · ${warning.code}${warning.view ? ` · ${warning.view}` : ''}: ${warning.message}`;
+        diagnostics.appendChild(line);
+      });
+    }
+    (r.diagnostics ? r.diagnostics.views : []).forEach(view => {
+      const select = document.createElement('button');
+      select.type = 'button'; select.className = 'diagnostic-view';
+      select.textContent = `${view.id} · ${view.role} · IoU ${(view.iou * 100).toFixed(0)}% · residual ${(view.residual * 100).toFixed(0)}%`;
+      select.addEventListener('click', () => { state.diagnosticViewIds[view.role] = view.id; drawAlignmentPreview(view.role); });
+      diagnostics.appendChild(select);
+    });
   }
 
   // ---------- thumbnails / batch ----------
@@ -386,7 +360,9 @@
     meta.appendChild(nm); meta.appendChild(sub);
     const st = document.createElement('span');
     el.appendChild(meta); el.appendChild(st);
-    const rec = { name, canvas, el, st, alignment: cloneData(defaultAlignment) };
+    const rec = { name, canvas, el, st, alignment: cloneData(defaultAlignment), viewMetadata: {
+      side: { frameMode: 'static' }, top: { frameMode: 'static' }, depthMap: { frameMode: 'static' },
+    } };
     setItemStatus(rec, status);
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
@@ -408,23 +384,26 @@
     state.sourceCanvas = rec.canvas;
     state.name = rec.name;
     state.sheet.frame = 0;
+    state.diagnosticViewIds = {};
     state.opts.alignment = ensureRecordAlignment(rec);
-    state.views = { side: rec.side || null, top: rec.top || null };
+    state.views = { side: rec.side || null, top: rec.top || null, depthMap: rec.depthMap || null };
+    ['side', 'top', 'depthMap'].forEach(kind => syncToggle(kind + 'FollowsSheet', rec.viewMetadata && rec.viewMetadata[kind] && rec.viewMetadata[kind].frameMode === 'sheet'));
     fillSlot('side', state.views.side);
     fillSlot('top', state.views.top);
+    fillSlot('depthMap', state.views.depthMap);
     $('srcName').textContent = rec.name;
     state.last = null;
     updateAlignmentViews();
-    setItemStatus(rec, 'done');
+    if (!state.batchBusy) setItemStatus(rec, 'done');
     updateFrameUI();
     refreshActionState();
     run();
   }
 
-  // ---------- multi-view slots (side / top) ----------
+  // ---------- multi-view slots ----------
   function fillSlot(kind, canvas) {
-    const el = $(kind === 'side' ? 'slotSide' : 'slotTop');
-    const label = kind === 'side' ? 'Perfil' : 'Cenital';
+    const el = $(kind === 'side' ? 'slotSide' : (kind === 'top' ? 'slotTop' : 'slotDepth'));
+    const label = kind === 'side' ? 'Perfil' : (kind === 'top' ? 'Cenital' : 'Depth');
     el.replaceChildren();
     if (canvas) {
       el.classList.add('set');
@@ -449,11 +428,11 @@
   function setView(kind, canvas) {
     const rec = activeRecord();
     if (rec) rec[kind] = canvas;
-    if (rec) state.opts.alignment = ensureRecordAlignment(rec);
+    if (rec && kind !== 'depthMap') state.opts.alignment = ensureRecordAlignment(rec);
     state.views[kind] = canvas;
     fillSlot(kind, canvas);
     state.last = null;
-    updateAlignmentViews();
+    if (kind !== 'depthMap') updateAlignmentViews();
     recompute();
   }
 
@@ -558,12 +537,12 @@
     return `voxelizer-batch-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${totalJobs}jobs.zip`;
   }
 
-  async function buildResultForItem(rec, frame, opts, sheet) {
-    const pixels = sliceFrameFromCanvas(rec.canvas, sheet, frame);
-    if (!pixels) throw new Error(`No se pudo leer ${rec.name}`);
-    const itemOpts = cloneOpts(opts);
-    itemOpts.alignment = cloneData(ensureRecordAlignment(rec));
-    return spawnVoxelTask(pixels, itemOpts, getItemViews(rec));
+  function createBatchManifest(sourceItems, opts, sheet) {
+    return VoxelBatch.createManifest(sourceItems, opts, sheet, {
+      readPixels: Voxel.canvasToPixels,
+      clone: VoxelTransfer.clone,
+      alignmentFor: ensureRecordAlignment,
+    });
   }
 
   function cancelBatchExport() {
@@ -571,7 +550,7 @@
     state.batchCancelRequested = true;
     $('statMain').textContent = 'Cancelando lote…';
     setBatchProgress(true, state.batchProgress.done, state.batchProgress.total, 'Cancelando lote…');
-    batchWorker.cancelAll('cancelled');
+    batchWorker.dispose('cancelled');
   }
 
   async function exportBatch() {
@@ -586,10 +565,11 @@
     cancelPreviewJob('stale');
     const batchOpts = cloneOpts();
     const batchSheet = { ...state.sheet };
-    const totalFrames = frameCount(batchSheet);
-    const totalJobs = items.length * totalFrames;
+    const manifest = createBatchManifest(items, batchOpts, batchSheet);
+    const totalJobs = manifest.totalJobs;
     let finished = 0, files = 0, failures = 0;
     const archiveFiles = [];
+    const outputState = { bytes: 0, maxBytes: VoxelBatch.MAX_BATCH_OUTPUT_BYTES };
     let cancelled = false;
     let failed = false;
     state.batchBusy = true;
@@ -599,29 +579,35 @@
     setBatchProgress(true, 0, totalJobs, 'Preparando lote…');
     refreshActionState();
     try {
-      for (const rec of items) {
-        setItemStatus(rec, 'progress', totalFrames > 1 ? `0/${totalFrames}` : 'PROC');
-        for (let frame = 0; frame < totalFrames; frame++) {
+      const progress = VoxelBatch.setProgressTotals(VoxelBatch.createProgress(manifest), manifest.totalFrames);
+      for (let jobIndex = 0; jobIndex < manifest.totalJobs; jobIndex++) {
+          const job = VoxelBatch.jobAt(manifest, jobIndex);
+          const rec = job.record, frame = job.frame, totalFrames = job.totalFrames;
+          const recordProgress = progress[job.recordIndex];
+          if (recordProgress.processed === 0) setItemStatus(rec, 'progress', totalFrames > 1 ? `0/${totalFrames}` : 'PROC');
           if (state.batchCancelRequested) throw new Error('cancelled');
           const suffix = totalFrames > 1 ? frameLabel(frame, totalFrames) : '';
-          const exportName = baseName(rec.name) + suffix;
+          const exportName = job.archiveBase + suffix;
           try {
-            const result = await buildResultForItem(rec, frame, batchOpts, batchSheet);
-            const outFiles = collectResultFiles(exportName, result, wantObj, wantVox, batchOpts);
-            archiveFiles.push(...outFiles);
+            const result = await spawnVoxelTask(job.pixels, job.opts, job.views);
+            const outFiles = collectResultFiles(exportName, result, wantObj, wantVox, job.opts);
+            VoxelBatch.appendOutput(archiveFiles, outFiles, outputState);
             files += outFiles.length;
-            setItemStatus(rec, 'progress', totalFrames > 1 ? `${frame + 1}/${totalFrames}` : 'PROC');
+            VoxelBatch.markProgress(progress, job.recordIndex, true);
           } catch (error) {
             if (error.message === 'cancelled') throw error;
+            if (error.code === 'BATCH_OUTPUT_BUDGET_EXCEEDED') throw error;
             failures++;
-            setItemStatus(rec, 'err');
+            VoxelBatch.markProgress(progress, job.recordIndex, false);
             console.error(error);
           }
+          const current = progress[job.recordIndex];
+          if (current.status === 'done') setItemStatus(rec, 'done');
+          else if (current.status === 'failed') setItemStatus(rec, 'err', `${current.succeeded}/${current.total}`);
+          else setItemStatus(rec, 'progress', totalFrames > 1 ? `${current.processed}/${totalFrames}` : 'PROC');
           finished++;
           $('statMain').textContent = `Exportando lote ${finished}/${totalJobs}`;
-          setBatchProgress(true, finished, totalJobs, rec.name);
-        }
-        if (!rec.st.classList.contains('err')) setItemStatus(rec, 'done');
+          setBatchProgress(true, finished, totalJobs, job.name);
       }
       if (!archiveFiles.length) {
         throw new Error('El batch no generó archivos exportables');
@@ -646,9 +632,7 @@
       state.batchCancelRequested = false;
       setBatchProgress(false, 0, 0, 'Listo');
       refreshActionState();
-      if (cancelled) $('statMain').textContent = 'Batch cancelado';
-      else if (failed) $('statMain').textContent = 'Error de batch';
-      else if (state.last) $('statMain').textContent = 'Batch completado';
+      $('statMain').textContent = VoxelBatch.terminalLabel({ cancelled, failed, failures });
     }
   }
 
@@ -715,7 +699,10 @@
     $(kind + 'AlignMeta').textContent = message;
   }
   function drawAlignmentPreview(kind) {
-    const debug = state.last && state.last.debug && state.last.debug.silhouettes ? state.last.debug.silhouettes[kind] : null;
+    const diagnosticView = state.last && state.last.diagnostics && state.last.diagnostics.views
+      ? state.last.diagnostics.views.find(view => view.role === kind && view.id === state.diagnosticViewIds[kind])
+        || state.last.diagnostics.views.find(view => view.role === kind) : null;
+    const debug = diagnosticView && state.last.debug && state.last.debug.views ? state.last.debug.views[diagnosticView.id] : null;
     const label = kind === 'side' ? 'perfil' : 'cenital';
     if (!state.views[kind]) {
       clearAlignmentPreview(kind, `Sin vista ${label} cargada.`);
@@ -734,8 +721,15 @@
     ctx.fillRect(0, 0, debug.w, debug.h);
     for (let y = 0; y < debug.h; y++) {
       for (let x = 0; x < debug.w; x++) {
-        if (!debug.mask[x + debug.w * y]) continue;
-        ctx.fillStyle = '#6de2e1';
+        const i = x + debug.w * y;
+        if (debug.overlay) {
+          const state = debug.overlay[i];
+          if (!state) continue;
+          ctx.fillStyle = state === 1 ? '#6de2e1' : (state === 2 ? '#ff9b54' : '#d56dff');
+        } else {
+          if (!debug.mask[i]) continue;
+          ctx.fillStyle = '#6de2e1';
+        }
         ctx.fillRect(x, y, 1, 1);
       }
     }
@@ -746,7 +740,7 @@
     }
     const b = debug.bounds;
     const summary = b
-      ? `BBox ${b.width}x${b.height} · off ${debug.transform.offsetX}/${debug.transform.offsetY} · escala ${debug.transform.scale.toFixed(2)} · rot ${debug.transform.rotation}°`
+      ? `${debug.id} · BBox ${b.width}x${b.height} · IoU ${debug.iou == null ? '—' : (debug.iou * 100).toFixed(0) + '%'} · residual ${debug.residual == null ? '—' : (debug.residual * 100).toFixed(0) + '%'} · off ${debug.transform.offsetX}/${debug.transform.offsetY}`
       : 'Sin silueta útil tras la transformación.';
     $(kind + 'AlignMeta').textContent = summary;
   }
@@ -811,6 +805,43 @@
     $('aoStr').disabled = !on;
   });
   slider('aoStr', 'vAoStr', v => state.opts.aoStrength = v / 100, v => v + '%');
+  toggle('silhouetteEnabled', on => state.opts.silhouetteEnabled = on);
+  slider('denoiseRadius', 'vDenoiseRadius', v => state.opts.denoiseRadius = v, v => `${v} px`);
+  slider('closeRadius', 'vCloseRadius', v => state.opts.closeRadius = v, v => `${v} px`);
+  slider('feather', 'vFeather', v => state.opts.feather = v / 100, v => `${v}%`);
+  $('resampling').addEventListener('change', () => { state.opts.resampling = $('resampling').value; recompute(); });
+  toggle('hardFrontConstraint', on => state.opts.hardFrontConstraint = on);
+  toggle('invertDepthMap', on => state.opts.invertDepthMap = on);
+  toggle('localWidthAware', on => state.opts.localWidthAware = on);
+  [['sideFollowsSheet', 'side'], ['topFollowsSheet', 'top'], ['depthMapFollowsSheet', 'depthMap']].forEach(([id, kind]) => {
+    toggle(id, on => {
+      const rec = activeRecord();
+      if (!rec) return;
+      if (!rec.viewMetadata) rec.viewMetadata = {};
+      rec.viewMetadata[kind] = { frameMode: on ? 'sheet' : 'static' };
+    });
+  });
+  slider('reconThreshold', 'vReconThreshold', v => state.opts.reconstructionThreshold = v / 100, v => `${v}%`);
+  slider('edgeTolerance', 'vEdgeTolerance', v => state.opts.edgeTolerance = v / 100, v => `${v}%`);
+  slider('sideWeight', 'vSideWeight', v => state.opts.sideWeight = v / 100, v => `${v}%`);
+  slider('topWeight', 'vTopWeight', v => state.opts.topWeight = v / 100, v => `${v}%`);
+  slider('frontRatio', 'vFrontRatio', v => state.opts.frontRatio = v / 100, v => `${v}%`);
+  slider('depthMapStrength', 'vDepthMapStrength', v => state.opts.depthMapStrength = v / 100, v => `${v}%`);
+  [...$('reconstructionModeSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.reconstructionMode = button.dataset.reconstruction;
+    [...$('reconstructionModeSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    recompute();
+  }));
+  [...$('depthVolumeSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.depthVolumeMode = button.dataset.volume;
+    [...$('depthVolumeSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    recompute();
+  }));
+  [...$('colorModeSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.colorMode = button.dataset.color;
+    [...$('colorModeSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    recompute();
+  }));
 
   // depth mode (segmented) + relief strength
   const MODE_HINT = {
@@ -997,9 +1028,11 @@
   // multi-view slot pickers (+ drag-drop onto a slot)
   bindPseudoButton($('slotSide'), () => $('fileSide').click());
   bindPseudoButton($('slotTop'), () => $('fileTop').click());
+  bindPseudoButton($('slotDepth'), () => $('fileDepth').click());
   $('fileSide').addEventListener('change', () => { const f = $('fileSide').files[0]; if (f) fileToCanvas(f, cv => setView('side', cv)); $('fileSide').value = ''; });
   $('fileTop').addEventListener('change', () => { const f = $('fileTop').files[0]; if (f) fileToCanvas(f, cv => setView('top', cv)); $('fileTop').value = ''; });
-  [['slotSide', 'side'], ['slotTop', 'top']].forEach(([id, kind]) => {
+  $('fileDepth').addEventListener('change', () => { const f = $('fileDepth').files[0]; if (f) fileToCanvas(f, cv => setView('depthMap', cv)); $('fileDepth').value = ''; });
+  [['slotSide', 'side'], ['slotTop', 'top'], ['slotDepth', 'depthMap']].forEach(([id, kind]) => {
     const s = $(id);
     ['dragenter', 'dragover'].forEach(ev => s.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); s.style.borderColor = 'var(--sel)'; }));
     ['dragleave', 'drop'].forEach(ev => s.addEventListener(ev, e => { e.preventDefault(); s.style.borderColor = ''; }));

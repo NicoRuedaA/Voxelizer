@@ -27,7 +27,10 @@ jobs:
           node --check voxelizer/voxel.js
           node --check voxelizer/voxio.js
           node --check voxelizer/worker.js
+          node --check voxelizer/batch.js
+          node --check voxelizer/worker-channel.js
+          node --check voxelizer/transfer.js
           node --check voxelizer/zip.js
 
-      - name: Run regression tests
-        run: node --test tests/voxelizer.test.js
+      - name: Run deterministic reconstruction suite
+        run: node --test --test-reporter=spec tests/voxelizer.test.js
