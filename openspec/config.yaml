@@ -1,0 +1,41 @@
+schema: spec-driven
+
+context: |
+  Project: voxelizer-app
+  Stack: browser JavaScript (CommonJS Node test harness), Three.js vendor scripts, static HTML/CSS/JS.
+  Architecture: deterministic voxelization core with UI, viewport, worker, batch, transfer, and export modules.
+  Testing: Node built-in test runner plus node --check syntax validation in GitHub Actions.
+  Style: small browser scripts, no package manager manifest, English technical documentation with legacy Spanish test names.
+
+strict_tdd: true
+testing:
+  strict_tdd: true
+  test_command: node --test --test-reporter=spec tests/voxelizer.test.js
+  check_command: node --check voxelizer/app.js && node --check voxelizer/profile-depth.js && node --check voxelizer/viewport.js && node --check voxelizer/voxel.js && node --check voxelizer/voxio.js && node --check voxelizer/worker.js && node --check voxelizer/batch.js && node --check voxelizer/worker-channel.js && node --check voxelizer/transfer.js && node --check voxelizer/zip.js
+  runner: Node.js built-in node:test
+  unit: true
+  integration: false
+  e2e: false
+  coverage: false
+  linter: false
+  type_checker: false
+  formatter: false
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes.
+  specs:
+    - Use Given/When/Then scenarios and RFC 2119 keywords.
+  design:
+    - Document architecture decisions with rationale.
+  tasks:
+    - Group by phase and keep tasks completable in one session.
+  apply:
+    tdd: true
+    test_command: node --test --test-reporter=spec tests/voxelizer.test.js
+  verify:
+    test_command: node --test --test-reporter=spec tests/voxelizer.test.js
+    build_command: node --check voxelizer/app.js
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas.

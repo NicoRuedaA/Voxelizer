@@ -1,6 +1,7 @@
 /* app.js — Three.js scene + UI wiring for the Voxelizer prototype.
    Depends on globals: THREE, THREE.OrbitControls, SAMPLE_SPRITES, Voxel,
-   VoxelTransfer, VoxelBatch, VoxelWorkerChannel, VoxIO, ZipUtil. */
+   VoxelTransfer, VoxelBatch, VoxelWorkerChannel, VoxelViewport,
+   VoxelProfileDepth, VoxIO, ZipUtil. */
 (function () {
   'use strict';
 
@@ -28,7 +29,7 @@
     opts: { ...defaultOpts, alignment: cloneData(defaultAlignment) },
     sheet: { c: 1, r: 1, frame: 0 },
     views: { side: null, top: null, depthMap: null },   // optional canvases for the active record
-    showWire: false, showGrid: false, autoRotate: true,
+    showWire: false, showGrid: false,
     last: null,          // last voxelize() result
     busy: false,
     batchBusy: false,
@@ -44,10 +45,11 @@
   host.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 5000);
-  camera.position.set(60, 55, 90);
+  const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000);
+  const orthographicCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 1000);
+  let modelWorldDims = [44, 44, 44];
 
-  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  const controls = new THREE.OrbitControls(perspectiveCamera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.09;
   controls.autoRotate = true;
@@ -64,12 +66,39 @@
 
   let mesh = null, wire = null;
 
+  const cameraController = VoxelViewport.createCameraController({
+    perspectiveCamera,
+    orthographicCamera,
+    controls,
+    dimensions: modelWorldDims,
+    aspect: 1,
+    autoRotate: true,
+  });
+
+  function syncCameraUi() {
+    const mode = cameraController.mode;
+    const perspective = mode === 'perspective';
+    $('btnRotate').disabled = !perspective;
+    setPressed($('btnRotate'), perspective && cameraController.autoRotatePreference);
+    document.querySelectorAll('[data-camera-mode]').forEach(button => setPressed(button, button.dataset.cameraMode === mode));
+    const labels = { perspective: 'Perspective', front: 'Front · orthographic', profile: 'Profile · orthographic', top: 'Top · orthographic' };
+    $('cameraModeLabel').textContent = labels[mode];
+  }
+
+  function resetCamera() {
+    cameraController.reset();
+  }
+
+  function setCameraMode(mode) {
+    cameraController.setMode(mode);
+    syncCameraUi();
+  }
+
   function resize() {
     const w = host.clientWidth, h = host.clientHeight;
     if (!w || !h) return;
     renderer.setSize(w, h);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
+    cameraController.resize(w / h);
   }
   window.addEventListener('resize', resize);
   if (window.ResizeObserver) new ResizeObserver(resize).observe(host);
@@ -77,7 +106,7 @@
   (function loop() {
     requestAnimationFrame(loop);
     controls.update();
-    renderer.render(scene, camera);
+    renderer.render(scene, cameraController.activeCamera);
   })();
 
   // ---------- shading ----------
@@ -112,9 +141,13 @@
   }
 
   // ---------- build geometry from faces ----------
-  function buildModel(result) {
+  function disposeModel() {
     if (mesh) { modelGroup.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); mesh = null; }
     if (wire) { modelGroup.remove(wire); wire.geometry.dispose(); wire.material.dispose(); wire = null; }
+  }
+
+  function buildModel(result) {
+    disposeModel();
 
     const faces = state.opts.greedy ? result.greedyFacesList : (result.naiveFacesList || result.greedyFacesList);
     const pal = result.palette;
@@ -164,6 +197,8 @@
     const maxDim = Math.max(DX, DY);
     const k = 44 / maxDim;
     modelGroup.scale.setScalar(k);
+    modelWorldDims = [DX * k, DY * k, DZ * k];
+    cameraController.setDimensions(modelWorldDims);
   }
 
   // ---------- sheet slicing ----------
@@ -206,6 +241,33 @@
     return views;
   }
 
+  function profileDepthState() {
+    const rec = activeRecord();
+    const views = rec ? getItemViews(rec, state.sheet, state.sheet.frame) : { views: [] };
+    return VoxelProfileDepth.actionState(views, Voxel.MAX_DEPTH_LAYERS, {
+      previewBusy: state.busy,
+      batchBusy: state.batchBusy,
+    });
+  }
+
+  function profileDepthMessage(match) {
+    if (match.busy) return 'Wait for the current preview or batch before matching depth.';
+    if (match.status === VoxelProfileDepth.STATUS.NO_SIDE_VIEW) return 'Add a calibrated profile view to match its selected frame width.';
+    if (match.status === VoxelProfileDepth.STATUS.INVALID_SIDE_PIXELS) return 'The selected profile frame is not a valid RGBA pixel payload.';
+    if (match.clamped) return `The selected profile frame is ${match.sourceWidth}px wide and is limited to ${match.depth} layers.`;
+    return `Use ${match.depth} layers: one depth layer per source pixel in the selected profile frame, before alignment or resampling.`;
+  }
+
+  function updateMatchProfileAction() {
+    const match = profileDepthState();
+    const button = $('matchProfileDepth');
+    const message = profileDepthMessage(match);
+    button.disabled = match.disabled;
+    button.title = message;
+    $('matchProfileHint').textContent = message;
+    return match;
+  }
+
   function createVoxelWorkerChannel() {
     return VoxelWorkerChannel.create({
       workerUrl: 'worker.js',
@@ -232,6 +294,25 @@
   // ---------- recompute (debounced to a frame) ----------
   let raf = 0;
   let renderSeq = 0;
+  function invalidatePreviewEvidence(statusText) {
+    state.last = null;
+    state.diagnosticViewIds = {};
+    disposeModel();
+    $('stVox').textContent = '—';
+    $('stRaw').textContent = '—';
+    $('stGreedy').textContent = '—';
+    $('stRed').textContent = '—';
+    $('srcDims').textContent = state.pixels ? `${state.pixels.w}×${state.pixels.h} px · — capas Z` : '—';
+    $('profileResolution').textContent = 'Profile resolution —';
+    $('profileResolution').classList.remove('warning');
+    $('palCount').textContent = '— colores';
+    $('statDims').textContent = '— grid';
+    $('swatches').replaceChildren();
+    $('diagnostics').replaceChildren();
+    updateAlignmentViews();
+    $('statMain').textContent = statusText;
+  }
+
   function recompute() {
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(run);
@@ -242,12 +323,11 @@
     const pixels = sliceFrame();
     if (!pixels) return;
     state.pixels = pixels;
-    state.last = null;
     const t0 = performance.now();
     const views = getItemViews(items.find(it => it.canvas === state.sourceCanvas) || {}, state.sheet, state.sheet.frame);
     state.busy = true;
+    invalidatePreviewEvidence('Voxelizando…');
     refreshActionState();
-    $('statMain').textContent = 'Voxelizando…';
     try {
       const result = await voxelizePreview(pixels, cloneOpts(), views);
       if (seq !== renderSeq) return;
@@ -258,8 +338,7 @@
       updateReadouts(result, ms);
     } catch (error) {
       if (error.message === 'stale') return;
-      state.last = null;
-      $('statMain').textContent = 'Error de voxelización';
+      invalidatePreviewEvidence('Error de voxelización');
       toast(error.message || 'No se pudo voxelizar el sprite');
     } finally {
       if (seq === renderSeq) state.busy = false;
@@ -290,6 +369,10 @@
     const red = r.naiveCount > 0 ? (100 * (1 - r.greedyFacesList.length / r.naiveCount)) : 0;
     $('stRed').textContent = '−' + red.toFixed(0) + '%';
     $('srcDims').textContent = `${state.pixels.w}×${state.pixels.h} px · ${r.dims[2]} capas Z`;
+    const profile = (r.diagnostics && r.diagnostics.views || [])
+      .map(view => view.profileResolution).find(Boolean);
+    $('profileResolution').textContent = profile ? profile.label : 'Profile resolution —';
+    $('profileResolution').classList.toggle('warning', !!(profile && profile.downsampled));
     $('palCount').textContent = r.palette.length + ' colores';
     const statDims = $('statDims');
     const dimsStrong = document.createElement('b');
@@ -320,7 +403,9 @@
     (r.diagnostics ? r.diagnostics.views : []).forEach(view => {
       const select = document.createElement('button');
       select.type = 'button'; select.className = 'diagnostic-view';
-      select.textContent = `${view.id} · ${view.role} · IoU ${(view.iou * 100).toFixed(0)}% · residual ${(view.residual * 100).toFixed(0)}%`;
+      const compatibility = view.material && view.material.compatibility;
+      const material = compatibility == null ? 'material —' : `material ${(compatibility * 100).toFixed(0)}%`;
+      select.textContent = `${view.id} · ${view.role} · IoU ${(view.iou * 100).toFixed(0)}% · residual ${(view.residual * 100).toFixed(0)}% · ${material}`;
       select.addEventListener('click', () => { state.diagnosticViewIds[view.role] = view.id; drawAlignmentPreview(view.role); });
       diagnostics.appendChild(select);
     });
@@ -394,6 +479,7 @@
     $('srcName').textContent = rec.name;
     state.last = null;
     updateAlignmentViews();
+    updateMatchProfileAction();
     if (!state.batchBusy) setItemStatus(rec, 'done');
     updateFrameUI();
     refreshActionState();
@@ -433,6 +519,7 @@
     fillSlot(kind, canvas);
     state.last = null;
     if (kind !== 'depthMap') updateAlignmentViews();
+    updateMatchProfileAction();
     recompute();
   }
 
@@ -489,6 +576,7 @@
     $('exportBtn').disabled = !state.last || state.busy || state.batchBusy;
     $('exportBatchBtn').disabled = !items.length || state.batchBusy;
     $('cancelBatchBtn').disabled = !state.batchBusy;
+    updateMatchProfileAction();
   }
 
   function download(name, text) {
@@ -688,6 +776,12 @@
     syncRange('humHead', Math.round(state.opts.humHead * 100), 'vHumHead', v => v + '%');
     syncRange('humSmooth', Math.round(state.opts.humSmooth * 100), 'vHumSmooth', v => v + '%');
   }
+  function syncMaterialControls() {
+    syncToggle('materialAwareness', state.opts.materialAwareness);
+    syncRange('materialTolerance', Math.round(state.opts.materialTolerance), 'vMaterialTolerance');
+    syncRange('materialStrength', Math.round(state.opts.materialStrength * 100), 'vMaterialStrength', v => v + '%');
+    setDisabled(['materialTolerance', 'materialStrength'], !state.opts.materialAwareness);
+  }
   function clearAlignmentPreview(kind, message) {
     const canvas = $(kind + 'AlignPreview');
     const ctx = canvas.getContext('2d');
@@ -722,7 +816,10 @@
     for (let y = 0; y < debug.h; y++) {
       for (let x = 0; x < debug.w; x++) {
         const i = x + debug.w * y;
-        if (debug.overlay) {
+        if (debug.materialOverlay && debug.materialOverlay[i]) {
+          const materialState = debug.materialOverlay[i];
+          ctx.fillStyle = materialState === 1 ? '#6de2a0' : (materialState === 2 ? '#ff6b6b' : '#d56dff');
+        } else if (debug.overlay) {
           const state = debug.overlay[i];
           if (!state) continue;
           ctx.fillStyle = state === 1 ? '#6de2e1' : (state === 2 ? '#ff9b54' : '#d56dff');
@@ -740,7 +837,7 @@
     }
     const b = debug.bounds;
     const summary = b
-      ? `${debug.id} · BBox ${b.width}x${b.height} · IoU ${debug.iou == null ? '—' : (debug.iou * 100).toFixed(0) + '%'} · residual ${debug.residual == null ? '—' : (debug.residual * 100).toFixed(0) + '%'} · off ${debug.transform.offsetX}/${debug.transform.offsetY}`
+      ? `${debug.id} · BBox ${b.width}x${b.height} · IoU ${debug.iou == null ? '—' : (debug.iou * 100).toFixed(0) + '%'} · material ${debug.material && debug.material.compatibility != null ? (debug.material.compatibility * 100).toFixed(0) + '%' : '—'} · residual ${debug.residual == null ? '—' : (debug.residual * 100).toFixed(0) + '%'} · off ${debug.transform.offsetX}/${debug.transform.offsetY}`
       : 'Sin silueta útil tras la transformación.';
     $(kind + 'AlignMeta').textContent = summary;
   }
@@ -779,6 +876,13 @@
     });
   }
   slider('depth', 'vDepth', v => state.opts.depth = v);
+  $('matchProfileDepth').addEventListener('click', () => {
+    const match = updateMatchProfileAction();
+    if (match.disabled) return;
+    state.opts.depth = match.depth;
+    syncRange('depth', match.depth, 'vDepth');
+    recompute();
+  });
   slider('alpha', 'vAlpha', v => state.opts.alpha = v);
   slider('colors', 'vColors', v => state.opts.colors = v);
   slider('scale', 'vScale', v => state.opts.scale = v / 10, v => (v / 10).toFixed(1));
@@ -811,6 +915,9 @@
   slider('feather', 'vFeather', v => state.opts.feather = v / 100, v => `${v}%`);
   $('resampling').addEventListener('change', () => { state.opts.resampling = $('resampling').value; recompute(); });
   toggle('hardFrontConstraint', on => state.opts.hardFrontConstraint = on);
+  toggle('materialAwareness', on => { state.opts.materialAwareness = on; syncMaterialControls(); });
+  slider('materialTolerance', 'vMaterialTolerance', v => state.opts.materialTolerance = v);
+  slider('materialStrength', 'vMaterialStrength', v => state.opts.materialStrength = v / 100, v => `${v}%`);
   toggle('invertDepthMap', on => state.opts.invertDepthMap = on);
   toggle('localWidthAware', on => state.opts.localWidthAware = on);
   [['sideFollowsSheet', 'side'], ['topFollowsSheet', 'top'], ['depthMapFollowsSheet', 'depthMap']].forEach(([id, kind]) => {
@@ -819,6 +926,7 @@
       if (!rec) return;
       if (!rec.viewMetadata) rec.viewMetadata = {};
       rec.viewMetadata[kind] = { frameMode: on ? 'sheet' : 'static' };
+      if (kind === 'side') updateMatchProfileAction();
     });
   });
   slider('reconThreshold', 'vReconThreshold', v => state.opts.reconstructionThreshold = v / 100, v => `${v}%`);
@@ -974,12 +1082,12 @@
     state.sheet.c = Math.max(1, Math.min(16, +$('sheetC').value || 1));
     state.sheet.r = Math.max(1, Math.min(16, +$('sheetR').value || 1));
     state.sheet.frame = 0;
-    updateFrameUI(); run();
+    updateFrameUI(); updateMatchProfileAction(); run();
   }
   $('sheetC').addEventListener('change', sheetChange);
   $('sheetR').addEventListener('change', sheetChange);
-  $('framePrev').addEventListener('click', () => { const t = state.sheet.c * state.sheet.r; state.sheet.frame = (state.sheet.frame - 1 + t) % t; updateFrameUI(); run(); });
-  $('frameNext').addEventListener('click', () => { const t = state.sheet.c * state.sheet.r; state.sheet.frame = (state.sheet.frame + 1) % t; updateFrameUI(); run(); });
+  $('framePrev').addEventListener('click', () => { const t = state.sheet.c * state.sheet.r; state.sheet.frame = (state.sheet.frame - 1 + t) % t; updateFrameUI(); updateMatchProfileAction(); run(); });
+  $('frameNext').addEventListener('click', () => { const t = state.sheet.c * state.sheet.r; state.sheet.frame = (state.sheet.frame + 1) % t; updateFrameUI(); updateMatchProfileAction(); run(); });
 
   // format checkboxes
   function chk(id) {
@@ -989,10 +1097,14 @@
   chk('fmtVox'); chk('fmtObj');
 
   // viewport toolbar
-  $('btnRotate').addEventListener('click', e => { state.autoRotate = !state.autoRotate; controls.autoRotate = state.autoRotate; setPressed(e.currentTarget, state.autoRotate); });
+  $('btnRotate').addEventListener('click', () => {
+    cameraController.setAutoRotate(!cameraController.autoRotatePreference);
+    syncCameraUi();
+  });
+  document.querySelectorAll('[data-camera-mode]').forEach(button => button.addEventListener('click', () => setCameraMode(button.dataset.cameraMode)));
   $('btnGrid').addEventListener('click', e => { state.showGrid = !state.showGrid; grid.visible = state.showGrid; setPressed(e.currentTarget, state.showGrid); });
   $('btnWire').addEventListener('click', e => { state.showWire = !state.showWire; if (wire) wire.visible = state.showWire; setPressed(e.currentTarget, state.showWire); });
-  $('btnReset').addEventListener('click', () => { camera.position.set(60, 55, 90); controls.target.set(0, 0, 0); });
+  $('btnReset').addEventListener('click', resetCamera);
 
   // export
   $('exportBtn').addEventListener('click', () => {
@@ -1047,6 +1159,8 @@
   function boot() {
     setBatchProgress(false, 0, 0, 'Listo');
     refreshActionState();
+    updateMatchProfileAction();
+    setCameraMode('perspective');
     resize();
     requestAnimationFrame(resize);
     setTimeout(resize, 120);
@@ -1056,7 +1170,23 @@
     });
   }
 
-  window.__dbg = { scene, camera, controls, get mesh() { return mesh; }, modelGroup, renderer };
+  window.__dbg = {
+    scene,
+    get camera() { return cameraController.activeCamera; },
+    perspectiveCamera,
+    orthographicCamera,
+    cameraController,
+    controls,
+    get mesh() { return mesh; },
+    get wire() { return wire; },
+    modelGroup,
+    renderer,
+    setCameraMode,
+    state,
+    buildModel,
+    invalidatePreviewEvidence,
+    refreshActionState,
+  };
 
   // wait for fonts/three then boot
   if (typeof THREE === 'undefined') {
@@ -1064,6 +1194,8 @@
   } else {
     syncHumanoidControls();
     syncMeshControls();
+    syncMaterialControls();
+    syncCameraUi();
     updateAlignmentViews();
     setMode(state.opts.depthMode, false);
     boot();

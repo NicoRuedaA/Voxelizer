@@ -6,8 +6,30 @@
                       dims:[DX,DY,DZ], palette:[[r,g,b], ...] }
    Sale:  Uint8Array con los bytes del .vox. */
 (function (root) {
-  function pushU32(a, v) { a.push(v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255); }
-  function pushStr(a, s) { for (let i = 0; i < s.length; i++) a.push(s.charCodeAt(i)); }
+  const MAX_VOX_EXPORT_BYTES = 16 * 1024 * 1024;
+  const VOX_FIXED_BYTES = 1096;
+
+  function exportError(code, message) {
+    const error = new RangeError(message);
+    error.code = code;
+    return error;
+  }
+
+  function writeId(bytes, offset, id) {
+    for (let i = 0; i < 4; i++) bytes[offset + i] = id.charCodeAt(i);
+    return offset + 4;
+  }
+
+  function writeU32(view, offset, value) {
+    view.setUint32(offset, value, true);
+    return offset + 4;
+  }
+
+  function writeChunkHeader(bytes, view, offset, id, contentBytes, childrenBytes) {
+    offset = writeId(bytes, offset, id);
+    offset = writeU32(view, offset, contentBytes);
+    return writeU32(view, offset, childrenBytes);
+  }
 
   function fixWinding(face) {
     let cs = face.corners, ao = face.ao || [1, 1, 1, 1];
@@ -77,25 +99,22 @@
     return { obj, mtl };
   }
 
-  function makeChunk(id, content, children) {
-    const out = [];
-    pushStr(out, id);
-    pushU32(out, content.length);
-    pushU32(out, children ? children.length : 0);
-    for (let i = 0; i < content.length; i++) out.push(content[i]);
-    if (children) for (let i = 0; i < children.length; i++) out.push(children[i]);
-    return out;
-  }
-
   function exportVox(result) {
     const [DX, DY, DZ] = result.dims;
     if (Math.max(DX, DY, DZ) > 256)
       throw new Error(`MagicaVoxel limita a 256^3 (modelo ${DX}x${DY}x${DZ})`);
     const grid = result.grid, pal = result.palette;
+    if (!Number.isSafeInteger(DX) || !Number.isSafeInteger(DY) || !Number.isSafeInteger(DZ) || DX <= 0 || DY <= 0 || DZ <= 0)
+      throw exportError('VOX_DIMENSIONS_INVALID', 'VOX dimensions must be positive safe integers');
+    if (!ArrayBuffer.isView(grid) || grid instanceof DataView || grid.length !== DX * DY * DZ)
+      throw exportError('VOX_GRID_INVALID', 'VOX grid length must equal width*height*depth');
     const colorIndexByKey = new Map(), exportColors = [], indexByInternal = new Map();
+    let count = 0;
     for (let i = 0; i < grid.length; i++) {
       const ci = grid[i];
-      if (ci < 0 || indexByInternal.has(ci)) continue;
+      if (ci < 0) continue;
+      count++;
+      if (indexByInternal.has(ci)) continue;
       const color = pal[ci];
       if (!color) throw new Error(`Missing palette color ${ci}`);
       const key = `${color[0] & 255},${color[1] & 255},${color[2] & 255}`;
@@ -109,38 +128,47 @@
       indexByInternal.set(ci, exportIndex);
     }
 
+    const outputBytes = VOX_FIXED_BYTES + count * 4;
+    if (!Number.isSafeInteger(outputBytes) || outputBytes > MAX_VOX_EXPORT_BYTES) {
+      throw exportError('VOX_EXPORT_BUDGET_EXCEEDED', `VOX output requires ${outputBytes} bytes; maximum is ${MAX_VOX_EXPORT_BYTES}`);
+    }
+
+    // One exact output allocation plus bounded palette maps; no number arrays or concat copies.
+    const bytes = new Uint8Array(outputBytes);
+    const view = new DataView(bytes.buffer);
+    let offset = 0;
+    offset = writeId(bytes, offset, 'VOX ');
+    offset = writeU32(view, offset, 150);
+    offset = writeChunkHeader(bytes, view, offset, 'MAIN', 0, outputBytes - 20);
+    offset = writeChunkHeader(bytes, view, offset, 'SIZE', 12, 0);
+    offset = writeU32(view, offset, DX);
+    offset = writeU32(view, offset, DZ);
+    offset = writeU32(view, offset, DY);
+    offset = writeChunkHeader(bytes, view, offset, 'XYZI', 4 + count * 4, 0);
+    offset = writeU32(view, offset, count);
+
     // voxels en orden x,y,z (igual que numpy.argwhere sobre un array (W,H,D))
-    const body = [];
-    let count = 0;
     for (let x = 0; x < DX; x++)
       for (let y = 0; y < DY; y++)
         for (let z = 0; z < DZ; z++) {
           const ci = grid[x + DX * (y + DY * z)];
           if (ci < 0) continue;
-          body.push(x & 255, z & 255, y & 255, indexByInternal.get(ci)); // Y<->Z, color 1-based
-          count++;
+          bytes[offset++] = x & 255;
+          bytes[offset++] = z & 255;
+          bytes[offset++] = y & 255;
+          bytes[offset++] = indexByInternal.get(ci); // Y<->Z, color 1-based
         }
-
-    const sizeContent = [];
-    pushU32(sizeContent, DX); pushU32(sizeContent, DZ); pushU32(sizeContent, DY); // W,D,H
-    const size = makeChunk('SIZE', sizeContent);
-
-    const xyziContent = [];
-    pushU32(xyziContent, count);
-    const xyzi = makeChunk('XYZI', xyziContent.concat(body));
-
-    const rgbaContent = [];
+    offset = writeChunkHeader(bytes, view, offset, 'RGBA', 1024, 0);
     for (let i = 0; i < 256; i++) {
       const c = i < exportColors.length ? exportColors[i] : [0, 0, 0];
-      rgbaContent.push(c[0] & 255, c[1] & 255, c[2] & 255, 255);
+      bytes[offset++] = c[0] & 255;
+      bytes[offset++] = c[1] & 255;
+      bytes[offset++] = c[2] & 255;
+      bytes[offset++] = 255;
     }
-    const rgba = makeChunk('RGBA', rgbaContent);
-
-    const main = makeChunk('MAIN', [], size.concat(xyzi).concat(rgba));
-    const header = [0x56, 0x4F, 0x58, 0x20]; // 'VOX '
-    pushU32(header, 150);                      // version
-    return new Uint8Array(header.concat(main));
+    if (offset !== outputBytes) throw new Error(`VOX writer size mismatch: ${offset} !== ${outputBytes}`);
+    return bytes;
   }
 
-  root.VoxIO = { exportVox, exportOBJ };
+  root.VoxIO = { MAX_VOX_EXPORT_BYTES, VOX_FIXED_BYTES, exportVox, exportOBJ };
 })(typeof window !== 'undefined' ? window : globalThis);

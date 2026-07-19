@@ -123,6 +123,9 @@ body{
 }
 .tbtn:hover{color:var(--txt);border-color:var(--line2);background:var(--bg3)}
 .tbtn.on{color:var(--sel);border-color:var(--sel);background:var(--sel-dim)}
+.tbtn.camera-btn{width:auto;padding:0 8px;font-size:10px}
+.vp-camera-mode{color:var(--sel);font-family:var(--pix);font-size:8px;letter-spacing:.4px}
+.vp-profile-resolution.warning{color:var(--accent)}
 
 .vp-info{
   position:absolute;top:12px;left:14px;z-index:5;color:var(--dim);font-size:10px;
@@ -362,8 +365,14 @@ input[type=range]:focus-visible,
         <div class="tag">SOURCE</div>
         <div id="srcName">—</div>
         <div id="srcDims" style="color:var(--dim2)">—</div>
+        <div id="profileResolution" class="vp-profile-resolution">Profile resolution —</div>
+        <div id="cameraModeLabel" class="vp-camera-mode">Perspective</div>
       </div>
       <div class="vp-toolbar">
+        <button type="button" class="tbtn camera-btn on" data-camera-mode="perspective" title="Perspective camera" aria-label="Use perspective camera" aria-pressed="true">Perspective</button>
+        <button type="button" class="tbtn camera-btn" data-camera-mode="front" title="Orthographic front view: X/Y looking along Z" aria-label="Use orthographic front view" aria-pressed="false">Front</button>
+        <button type="button" class="tbtn camera-btn" data-camera-mode="profile" title="Orthographic profile view: Z/Y" aria-label="Use orthographic profile view" aria-pressed="false">Profile</button>
+        <button type="button" class="tbtn camera-btn" data-camera-mode="top" title="Orthographic top view: X/Z" aria-label="Use orthographic top view" aria-pressed="false">Top</button>
         <button type="button" class="tbtn on" id="btnRotate" title="Auto-rotación" aria-label="Alternar auto-rotación" aria-pressed="true">↻</button>
         <button type="button" class="tbtn" id="btnGrid" title="Rejilla" aria-label="Alternar rejilla" aria-pressed="false">▦</button>
         <button type="button" class="tbtn" id="btnWire" title="Mostrar malla / caras" aria-label="Alternar malla alámbrica" aria-pressed="false">◇</button>
@@ -386,8 +395,9 @@ input[type=range]:focus-visible,
         <div class="grp">
           <div class="sec-h" style="padding-top:4px"><span>Extrusión</span></div>
           <div class="ctl">
-            <div class="row"><span class="lbl">Profundidad <span class="flag">--depth</span></span><span class="val" id="vDepth">6</span></div>
-            <input type="range" id="depth" min="1" max="32" value="6">
+            <div class="row"><span class="lbl">Profundidad <span class="flag">--depth</span></span><span><button type="button" class="mini-reset" id="matchProfileDepth" disabled>Match profile</button> <span class="val" id="vDepth">6</span></span></div>
+            <input type="range" id="depth" min="1" max="256" step="1" value="6">
+            <div class="hint" id="matchProfileHint" style="text-align:left">Add a calibrated profile view to match its selected frame width.</div>
             <details class="adv-panel" id="advancedReconstruction">
               <summary>Reconstrucción avanzada</summary>
               <div class="row" style="margin-top:11px"><span class="lbl">Modo de relieve</span><button type="button" class="mini-reset" id="resetDepthProfile">Restablecer</button></div>
@@ -455,6 +465,12 @@ input[type=range]:focus-visible,
               <div class="row" style="margin-top:9px"><span class="lbl">Peso cenital</span><span class="val" id="vTopWeight">100%</span></div>
               <input type="range" id="topWeight" min="0" max="400" value="100">
               <div class="row" style="margin-top:9px"><span class="lbl">Restringir a frontal</span><button type="button" class="toggle on" id="hardFrontConstraint" aria-pressed="true"></button></div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Compatibilidad de materiales</span><button type="button" class="toggle on" id="materialAwareness" aria-pressed="true"></button></div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Tolerancia RGB perceptual</span><span class="val" id="vMaterialTolerance">48</span></div>
+              <input type="range" id="materialTolerance" min="0" max="128" value="48">
+              <div class="row" style="margin-top:9px"><span class="lbl">Influencia material</span><span class="val" id="vMaterialStrength">60%</span></div>
+              <input type="range" id="materialStrength" min="0" max="100" value="60">
+              <div class="hint" style="text-align:left">En modo estricto exige una proporción mínima de evidencia compatible; en modo ponderado controla cuánto penaliza una incompatibilidad. El IoU mide silueta, no correspondencia semántica.</div>
               <div class="row" style="margin-top:9px"><span class="lbl">Perfil sigue spritesheet</span><button type="button" class="toggle" id="sideFollowsSheet" aria-pressed="false"></button></div>
               <div class="row"><span class="lbl">Cenital sigue spritesheet</span><button type="button" class="toggle" id="topFollowsSheet" aria-pressed="false"></button></div>
               <div class="row"><span class="lbl">Depth sigue spritesheet</span><button type="button" class="toggle" id="depthMapFollowsSheet" aria-pressed="false"></button></div>
@@ -615,6 +631,8 @@ input[type=range]:focus-visible,
 <script src="transfer.js"></script>
 <script src="batch.js"></script>
 <script src="worker-channel.js"></script>
+<script src="profile-depth.js"></script>
+<script src="viewport.js"></script>
 <script src="voxel.js"></script>
 <script src="voxio.js"></script>
 <script src="zip.js"></script>

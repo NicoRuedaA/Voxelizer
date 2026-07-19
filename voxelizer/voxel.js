@@ -3,9 +3,12 @@
    turns into geometry. This is where the --depth / --alpha / quantize /
    --depth-map / greedy options actually take effect. */
 
-const CONFIG_VERSION = 2;
+const CONFIG_VERSION = 3;
 const MAX_PIXEL_COUNT = 4 * 1024 * 1024;
 const MAX_VOXEL_COUNT = 16 * 1024 * 1024;
+// 256^3 is exactly the logical grid budget. Larger requested depths are
+// normalized down before the W*H*D preflight validates the actual grid.
+const MAX_DEPTH_LAYERS = 256;
 const MAX_MORPH_WORK = 64 * 1024 * 1024;
 const MAX_TOTAL_MORPH_WORK = 128 * 1024 * 1024;
 const MAX_VIEW_COUNT = 8;
@@ -15,6 +18,14 @@ const MAX_MESH_VOXELS = 2 * 1024 * 1024;
 const MAX_EXPOSED_FACES = 250000;
 const MAX_FACE_ALLOCATION_BYTES = 64 * 1024 * 1024;
 const FACE_OBJECT_ESTIMATE_BYTES = 152;
+const MAX_MATERIAL_CLUSTERS = 64;
+const MAX_MATERIAL_EVIDENCE_BYTES = 8 * 1024 * 1024;
+const MAX_MATERIAL_COMPARE_WORK = 64 * 1024 * 1024;
+const MAX_MATERIAL_TOLERANCE = 128;
+const MAX_TRANSFORMED_VIEW_CELLS = 8 * 1024 * 1024;
+const MAX_TRANSFORMED_VIEW_BYTES = 128 * 1024 * 1024;
+const NO_MATERIAL = 255;
+const MATERIAL_CONFIG_KEYS = ['enabled', 'tolerance', 'strength'];
 const RESAMPLING_MODES = ['nearest', 'area', 'bilinear'];
 const RECONSTRUCTION_MODES = ['strict', 'weighted'];
 const DEPTH_VOLUME_MODES = ['symmetric', 'asymmetric', 'depthmap'];
@@ -58,6 +69,11 @@ const DEFAULT_CONFIG = {
     sideWeight: 1,
     topWeight: 1,
     hardFrontConstraint: true,
+  },
+  material: {
+    enabled: true,
+    tolerance: 48,
+    strength: 0.6,
   },
   depth: {
     layers: 6,
@@ -131,7 +147,7 @@ function _coerceBool(value, fallback) {
 function _configShape(input) {
   if (!_isObject(input)) return {};
   const out = {};
-  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'depth', 'mesh', 'color'];
+  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'material', 'depth', 'mesh', 'color'];
   for (const key of keys) {
     const value = input[key];
     if (key === 'version') {
@@ -181,6 +197,9 @@ function _legacyPatch(input) {
   if ('sideWeight' in input) patch.reconstruction = { ...(patch.reconstruction || {}), sideWeight: input.sideWeight };
   if ('topWeight' in input) patch.reconstruction = { ...(patch.reconstruction || {}), topWeight: input.topWeight };
   if ('hardFrontConstraint' in input) patch.reconstruction = { ...(patch.reconstruction || {}), hardFrontConstraint: input.hardFrontConstraint };
+  if ('materialAwareness' in input) patch.material = { ...(patch.material || {}), enabled: input.materialAwareness };
+  if ('materialTolerance' in input) patch.material = { ...(patch.material || {}), tolerance: input.materialTolerance };
+  if ('materialStrength' in input) patch.material = { ...(patch.material || {}), strength: input.materialStrength };
   if ('colorMode' in input) patch.color = { ...(patch.color || {}), mode: input.colorMode };
   if ('sideColorMode' in input) patch.color = { ...(patch.color || {}), side: input.sideColorMode };
   if ('backColorMode' in input) patch.color = { ...(patch.color || {}), back: input.backColorMode };
@@ -204,8 +223,14 @@ function createDefaultConfig() {
 function migrateConfig(input) {
   if (!_isObject(input)) return input;
   const migrated = _cloneConfig(input);
-  if (Number(migrated.version) === 1) {
+  const version = Number(migrated.version);
+  if (version === 1) {
     migrated.depth = { ...(migrated.depth || {}), localWidthAware: false };
+  }
+  if (version === 1 || version === 2) {
+    const explicitMaterialFields = (_isObject(migrated.material) && MATERIAL_CONFIG_KEYS.some(key => key in migrated.material))
+      || ['materialAwareness', 'materialTolerance', 'materialStrength'].some(key => key in migrated);
+    if (!explicitMaterialFields) migrated.material = { ...(migrated.material || {}), enabled: false };
     migrated.version = CONFIG_VERSION;
   }
   return migrated;
@@ -246,8 +271,13 @@ function normalizeConfig(input) {
       topWeight: _clampNumber(merged.reconstruction && merged.reconstruction.topWeight, 0, 4, DEFAULT_CONFIG.reconstruction.topWeight),
       hardFrontConstraint: _coerceBool(merged.reconstruction && merged.reconstruction.hardFrontConstraint, DEFAULT_CONFIG.reconstruction.hardFrontConstraint),
     },
+    material: {
+      enabled: _coerceBool(merged.material && merged.material.enabled, DEFAULT_CONFIG.material.enabled),
+      tolerance: _clampNumber(merged.material && merged.material.tolerance, 0, MAX_MATERIAL_TOLERANCE, DEFAULT_CONFIG.material.tolerance),
+      strength: _clampNumber(merged.material && merged.material.strength, 0, 1, DEFAULT_CONFIG.material.strength),
+    },
     depth: {
-      layers: _clampInt(merged.depth && merged.depth.layers, 1, 64, DEFAULT_CONFIG.depth.layers),
+      layers: _clampInt(merged.depth && merged.depth.layers, 1, MAX_DEPTH_LAYERS, DEFAULT_CONFIG.depth.layers),
       mode: _pickEnum(merged.depth && merged.depth.mode, DEPTH_VOLUME_MODES, DEFAULT_CONFIG.depth.mode),
       frontRatio: _clampNumber(merged.depth && merged.depth.frontRatio, 0, 1, DEFAULT_CONFIG.depth.frontRatio),
       profile: _pickEnum(merged.depth && merged.depth.profile, DEPTH_PROFILE_MODES, DEFAULT_CONFIG.depth.profile),
@@ -320,6 +350,9 @@ function legacyOptionsFromConfig(input) {
     sideWeight: config.reconstruction.sideWeight,
     topWeight: config.reconstruction.topWeight,
     hardFrontConstraint: config.reconstruction.hardFrontConstraint,
+    materialAwareness: config.material.enabled,
+    materialTolerance: config.material.tolerance,
+    materialStrength: config.material.strength,
     colorMode: config.color.mode,
     sideColorMode: config.color.side,
     backColorMode: config.color.back,
@@ -1129,6 +1162,7 @@ function normalizeViewInputs(views, config) {
     return {
       role,
       pixels,
+      materialEvidence: descriptor.materialEvidence !== false,
       transform: _normalizeViewTransform({ ...configured, ...(descriptor.transform || {}) }),
       confidence: _clampNumber(descriptor.confidence, 0, 1, 1),
       orientation,
@@ -1138,6 +1172,26 @@ function normalizeViewInputs(views, config) {
       valid: !!pixels && !!canonical && !issues.some(issue => issue.code === 'UNSUPPORTED_ORIENTATION'),
     };
   });
+}
+function _assertTransformedViewBudgets(inputs, dims, materialEnabled) {
+  const [W, H, D] = dims;
+  let transformedCells = 0, sourceCells = 0;
+  for (const input of inputs) {
+    if (!input.valid || !input.pixels || (input.role !== 'side' && input.role !== 'top')) continue;
+    transformedCells += input.role === 'side' ? D * H : W * D;
+    sourceCells += input.pixels.w * input.pixels.h;
+  }
+  // Includes resampled mask/confidence/RGB, inverse/EDT/edge distance,
+  // projected diagnostic buffers and the worst-case material arrays.
+  const targetBytesPerCell = materialEnabled ? 32 : 25;
+  // Includes source RGBA, morphology masks, confidence, per-channel sampling
+  // scratch and the optional feather EDT. This is deliberately conservative.
+  const sourceBytesPerCell = 25;
+  const peakBytes = transformedCells * targetBytesPerCell + sourceCells * sourceBytesPerCell;
+  if (transformedCells > MAX_TRANSFORMED_VIEW_CELLS || peakBytes > MAX_TRANSFORMED_VIEW_BYTES) {
+    throw _budgetError('TRANSFORMED_VIEW_BUDGET_EXCEEDED', `Transformed auxiliary views require ${transformedCells} cells and an estimated ${peakBytes} peak bytes`);
+  }
+  return { transformedCells, peakBytes };
 }
 function _assertAuxiliaryBudgets(inputs, silhouette) {
   if (inputs.length > MAX_VIEW_COUNT) throw _budgetError('VIEW_COUNT_BUDGET_EXCEEDED', `A reconstruction accepts at most ${MAX_VIEW_COUNT} auxiliary views`);
@@ -1167,6 +1221,7 @@ function prepareSilhouettes(config, views, dims) {
   const [W, H, D] = dims;
   const alpha = config.silhouette.alphaThreshold;
   const transformed = transformViews(views, config);
+  const budget = _assertTransformedViewBudgets(transformed, dims, config.material.enabled);
   const prepared = [];
   for (const view of transformed) {
     if (!view.valid || !view.pixels || (view.role !== 'side' && view.role !== 'top')) continue;
@@ -1191,6 +1246,7 @@ function prepareSilhouettes(config, views, dims) {
     topMask: top && top.mask,
     topCol: top ? _projectAxis(top.mask, top.w, top.h, 'col') : null,
     transformed,
+    budget,
     previews: {
       byId,
       side: side ? byId[side.id] : null,
@@ -1246,6 +1302,322 @@ function _viewConfidenceAt(view, sample, edgeTolerance) {
   const distance = view.edgeDistance[sample];
   return distance <= radius ? Math.max(0, 1 - distance / (radius + 0.001)) : 0;
 }
+function _materialDistance(ar, ag, ab, br, bg, bb) {
+  const dr = ar - br, dg = ag - bg, db = ab - bb;
+  // Weighted RGB keeps the control in familiar 0..255 units while giving
+  // green-channel differences the perceptual importance they deserve.
+  return Math.sqrt(2 * dr * dr + 4 * dg * dg + 3 * db * db) / 3;
+}
+function _nearestMaterialCluster(centers, count, r, g, b, tolerance) {
+  let nearest = -1, distance = Infinity;
+  for (let cluster = 0; cluster < count; cluster++) {
+    const base = cluster * 3;
+    const d = _materialDistance(centers[base], centers[base + 1], centers[base + 2], r, g, b);
+    if (d < distance) { distance = d; nearest = cluster; }
+  }
+  return distance <= tolerance ? nearest : -(nearest + 2);
+}
+function _clusterFrontMaterials(quant, tolerance) {
+  const paletteCounts = new Uint32Array(quant.palette.length);
+  for (let i = 0; i < quant.idxAt.length; i++) if (quant.idxAt[i] >= 0) paletteCounts[quant.idxAt[i]]++;
+  const centers = new Uint8Array(MAX_MATERIAL_CLUSTERS * 3);
+  const counts = new Uint32Array(MAX_MATERIAL_CLUSTERS);
+  const paletteCluster = new Uint8Array(quant.palette.length).fill(NO_MATERIAL);
+  let clusterCount = 0, clipped = false;
+  for (let paletteIndex = 0; paletteIndex < quant.palette.length; paletteIndex++) {
+    if (!paletteCounts[paletteIndex]) continue;
+    const rgb = quant.palette[paletteIndex];
+    const selection = _nearestMaterialCluster(centers, clusterCount, rgb[0], rgb[1], rgb[2], tolerance);
+    let cluster = selection >= 0 ? selection : -1;
+    if (cluster < 0) {
+      if (clusterCount < MAX_MATERIAL_CLUSTERS) {
+        cluster = clusterCount++;
+        centers.set(rgb, cluster * 3);
+      } else {
+        cluster = -selection - 2;
+        clipped = true;
+      }
+    }
+    paletteCluster[paletteIndex] = cluster;
+    const previous = counts[cluster], added = paletteCounts[paletteIndex], total = previous + added;
+    const base = cluster * 3;
+    if (previous) for (let channel = 0; channel < 3; channel++) {
+      centers[base + channel] = Math.round((centers[base + channel] * previous + rgb[channel] * added) / total);
+    }
+    counts[cluster] = total;
+  }
+  const clusterAt = new Uint8Array(quant.idxAt.length).fill(NO_MATERIAL);
+  for (let i = 0; i < clusterAt.length; i++) if (quant.idxAt[i] >= 0) clusterAt[i] = paletteCluster[quant.idxAt[i]];
+  return { centers, counts, paletteCluster, clusterAt, clusterCount, clipped };
+}
+function _clusterViewMaterials(view, tolerance, maxWork) {
+  let opaque = 0;
+  for (let i = 0; i < view.mask.length; i++) if (view.mask[i]) opaque++;
+  if (!opaque) return { usable: false, opaque, ids: null, centers: null, counts: null, clusterCount: 0, clipped: false, budgetExceeded: false, work: 0 };
+  // Worst-case clustering plus shared-axis compatibility scan.
+  const work = opaque * MAX_MATERIAL_CLUSTERS * 2 + MAX_MATERIAL_CLUSTERS * MAX_MATERIAL_CLUSTERS;
+  if (work > maxWork) {
+    return { usable: false, opaque, ids: null, centers: null, counts: null, clusterCount: 0, clipped: false, budgetExceeded: true, work: 0 };
+  }
+  const ids = new Uint8Array(view.mask.length).fill(NO_MATERIAL);
+  const centers = new Uint8Array(MAX_MATERIAL_CLUSTERS * 3);
+  const counts = new Uint32Array(MAX_MATERIAL_CLUSTERS);
+  let clusterCount = 0, clipped = false;
+  for (let i = 0; i < view.mask.length; i++) {
+    if (!view.mask[i]) continue;
+    const r = view.colors[i * 3], g = view.colors[i * 3 + 1], b = view.colors[i * 3 + 2];
+    const selection = _nearestMaterialCluster(centers, clusterCount, r, g, b, tolerance);
+    let cluster = selection >= 0 ? selection : -1;
+    if (cluster < 0) {
+      if (clusterCount < MAX_MATERIAL_CLUSTERS) {
+        cluster = clusterCount++;
+        const base = cluster * 3;
+        centers[base] = r; centers[base + 1] = g; centers[base + 2] = b;
+      } else {
+        cluster = -selection - 2;
+        clipped = true;
+      }
+    }
+    ids[i] = cluster;
+    const previous = counts[cluster], total = previous + 1, base = cluster * 3;
+    if (previous) for (let channel = 0; channel < 3; channel++) {
+      const value = channel === 0 ? r : (channel === 1 ? g : b);
+      centers[base + channel] = Math.round((centers[base + channel] * previous + value) / total);
+    }
+    counts[cluster] = total;
+  }
+  return { usable: true, opaque, ids, centers, counts, clusterCount, clipped, budgetExceeded: false, work };
+}
+function _materialEvidenceBytes(state) {
+  if (!state) return 0;
+  const arrays = [];
+  const add = value => { if (ArrayBuffer.isView(value)) arrays.push(value); };
+  if (state.front) {
+    add(state.front.centers); add(state.front.counts); add(state.front.paletteCluster); add(state.front.clusterAt);
+  }
+  add(state.rowBits); add(state.colBits); add(state.supportedFront); add(state.surfaceOnly);
+  add(state.structuralColorAt); add(state.acceptedVoxels); add(state.acceptedMinZ); add(state.acceptedMaxZ);
+  for (const view of state.views || []) {
+    add(view.ids); add(view.centers); add(view.counts); add(view.supportedFront); add(view.compatibility);
+    add(view.overlay); add(view.candidateMatchesBySample); add(view.candidateMismatchesBySample); add(view.diagnosticOverlay);
+  }
+  const seen = new Set();
+  let total = 0;
+  for (const array of arrays) {
+    if (seen.has(array.buffer)) continue;
+    seen.add(array.buffer); total += array.byteLength;
+  }
+  return total;
+}
+function _refreshMaterialEvidenceBytes(state) {
+  state.memoryBytes = _materialEvidenceBytes(state);
+  return state.memoryBytes;
+}
+function _materialEvidenceWorstCaseBytes(quant, silhouettes) {
+  const W = quant.w, H = quant.h, words = Math.ceil(MAX_MATERIAL_CLUSTERS / 32);
+  const hasSide = silhouettes.prepared.some(view => view.role === 'side');
+  const hasTop = silhouettes.prepared.some(view => view.role === 'top');
+  let bytes = quant.idxAt.length * 3 + quant.palette.length + 192 + 256 + MAX_MATERIAL_CLUSTERS * 10;
+  bytes += ((hasSide ? H : 0) + (hasTop ? W : 0)) * words * 4;
+  for (const view of silhouettes.prepared) {
+    bytes += MAX_MATERIAL_CLUSTERS;
+    if (view.materialEvidence) bytes += view.mask.length * 7 + 192 + 256 + MAX_MATERIAL_CLUSTERS * MAX_MATERIAL_CLUSTERS;
+  }
+  return bytes;
+}
+function _axisHasCluster(bits, words, axis, cluster) {
+  return !!(bits[axis * words + (cluster >> 5)] & (1 << (cluster & 31)));
+}
+function _buildStructuralColors(quant, front, surfaceOnly) {
+  const nearest = new Int16Array(quant.idxAt.length).fill(-1);
+  const queue = new Int32Array(quant.idxAt.length);
+  let head = 0, tail = 0;
+  for (let i = 0; i < nearest.length; i++) {
+    const paletteIndex = quant.idxAt[i], cluster = front.clusterAt[i];
+    if (paletteIndex >= 0 && cluster !== NO_MATERIAL && !surfaceOnly[cluster]) {
+      nearest[i] = paletteIndex;
+      queue[tail++] = i;
+    }
+  }
+  while (head < tail) {
+    const i = queue[head++], x = i % quant.w, y = (i / quant.w) | 0;
+    let n;
+    if (x > 0 && nearest[n = i - 1] < 0) { nearest[n] = nearest[i]; queue[tail++] = n; }
+    if (x + 1 < quant.w && nearest[n = i + 1] < 0) { nearest[n] = nearest[i]; queue[tail++] = n; }
+    if (y > 0 && nearest[n = i - quant.w] < 0) { nearest[n] = nearest[i]; queue[tail++] = n; }
+    if (y + 1 < quant.h && nearest[n = i + quant.w] < 0) { nearest[n] = nearest[i]; queue[tail++] = n; }
+  }
+  return nearest;
+}
+function prepareMaterialEvidence(quant, silhouettes, config) {
+  const enabled = !!config.material.enabled;
+  const requested = enabled;
+  const effective = enabled && config.material.strength > 0;
+  const state = {
+    enabled,
+    requested,
+    effective,
+    active: false,
+    reason: !enabled ? 'disabled' : (config.material.strength <= 0 ? 'zero-strength' : (silhouettes.prepared.length ? 'mask-only' : 'no-auxiliary-views')),
+    tolerance: config.material.tolerance,
+    strength: config.material.strength,
+    views: [],
+    byId: Object.create(null),
+    unmatched: [],
+    memoryBytes: 0,
+    clusterCount: 0,
+    clipped: false,
+  };
+  if (!effective || !silhouettes.prepared.length) return state;
+  const W = quant.w, H = quant.h;
+  const hasSide = silhouettes.prepared.some(view => view.role === 'side');
+  const hasTop = silhouettes.prepared.some(view => view.role === 'top');
+  const words = Math.ceil(MAX_MATERIAL_CLUSTERS / 32);
+  const estimatedEvidenceBytes = _materialEvidenceWorstCaseBytes(quant, silhouettes);
+  if (estimatedEvidenceBytes > MAX_MATERIAL_EVIDENCE_BYTES) {
+    state.reason = 'material-evidence-budget';
+    return state;
+  }
+  const front = _clusterFrontMaterials(quant, config.material.tolerance);
+  state.front = front;
+  state.clusterCount = front.clusterCount;
+  state.clipped = front.clipped;
+  const rowBits = hasSide ? new Uint32Array(H * words) : null;
+  const colBits = hasTop ? new Uint32Array(W * words) : null;
+  for (let py = 0; py < H; py++) for (let x = 0; x < W; x++) {
+    const cluster = front.clusterAt[x + W * py];
+    if (cluster === NO_MATERIAL) continue;
+    if (rowBits) rowBits[py * words + (cluster >> 5)] |= 1 << (cluster & 31);
+    if (colBits) colBits[x * words + (cluster >> 5)] |= 1 << (cluster & 31);
+  }
+  const supported = new Uint8Array(front.clusterCount);
+  let usableViews = 0, compareWork = 0;
+  for (const view of silhouettes.prepared) {
+    const clustered = view.materialEvidence
+      ? _clusterViewMaterials(view, config.material.tolerance, MAX_MATERIAL_COMPARE_WORK - compareWork)
+      : { usable: false, opaque: 0, ids: null, centers: null, counts: null, clusterCount: 0, clipped: false, budgetExceeded: false, work: 0 };
+    compareWork += clustered.work;
+    const effectiveWeight = _viewWeight(view, config);
+    const entry = {
+      id: view.id,
+      role: view.role,
+      eligible: !!view.materialEvidence,
+      usable: clustered.usable && effectiveWeight > 0,
+      rgbUsable: clustered.usable,
+      effectiveWeight,
+      opaque: clustered.opaque,
+      ids: clustered.ids,
+      centers: clustered.centers,
+      counts: clustered.counts,
+      clusterCount: clustered.clusterCount,
+      clipped: clustered.clipped,
+      budgetExceeded: clustered.budgetExceeded,
+      supportedFront: new Uint8Array(front.clusterCount),
+      compatibility: null,
+      overlay: view.materialEvidence ? new Uint8Array(view.mask.length) : null,
+      compatiblePixels: 0,
+      mismatchPixels: 0,
+      candidateMatches: 0,
+      candidateMismatches: 0,
+      candidateMatchesBySample: view.materialEvidence ? new Uint16Array(view.mask.length) : null,
+      candidateMismatchesBySample: view.materialEvidence ? new Uint16Array(view.mask.length) : null,
+    };
+    state.clipped = state.clipped || clustered.clipped;
+    state.compareBudgetExceeded = state.compareBudgetExceeded || clustered.budgetExceeded;
+    if (entry.usable) {
+      usableViews++;
+      entry.compatibility = new Uint8Array(front.clusterCount * clustered.clusterCount);
+      for (let fc = 0; fc < front.clusterCount; fc++) for (let vc = 0; vc < clustered.clusterCount; vc++) {
+        const fb = fc * 3, vb = vc * 3;
+        if (_materialDistance(
+          front.centers[fb], front.centers[fb + 1], front.centers[fb + 2],
+          clustered.centers[vb], clustered.centers[vb + 1], clustered.centers[vb + 2]
+        ) <= config.material.tolerance) entry.compatibility[fc * clustered.clusterCount + vc] = 1;
+      }
+      const axisBits = view.role === 'side' ? rowBits : colBits;
+      for (let sample = 0; sample < view.mask.length; sample++) {
+        if (!view.mask[sample]) continue;
+        const x = sample % view.w, y = (sample / view.w) | 0;
+        const axis = view.role === 'side' ? y : x;
+        const vc = clustered.ids[sample];
+        let match = false;
+        for (let fc = 0; fc < front.clusterCount; fc++) {
+          if (!_axisHasCluster(axisBits, words, axis, fc)) continue;
+          if (entry.compatibility[fc * clustered.clusterCount + vc]) {
+            entry.supportedFront[fc] = 1;
+            supported[fc] = 1;
+            match = true;
+          }
+        }
+        entry.overlay[sample] = match ? 1 : 2;
+        if (match) entry.compatiblePixels++; else entry.mismatchPixels++;
+      }
+    }
+    state.views.push(entry);
+    state.byId[entry.id] = entry;
+  }
+  state.usableViews = usableViews;
+  state.compareWork = compareWork;
+  state.rowBits = rowBits;
+  state.colBits = colBits;
+  state.supportedFront = supported;
+  _refreshMaterialEvidenceBytes(state);
+  if (!usableViews) {
+    if (state.compareBudgetExceeded) state.reason = 'material-compare-budget';
+    else if (state.views.some(view => view.eligible && view.rgbUsable)) state.reason = 'no-effective-material-weight';
+    else state.reason = state.views.some(view => view.eligible) ? 'missing-rgb-evidence' : 'mask-only';
+    return state;
+  }
+  let supportedClusters = 0, occupiedFront = 0;
+  for (let cluster = 0; cluster < front.clusterCount; cluster++) {
+    occupiedFront += front.counts[cluster];
+    if (supported[cluster]) supportedClusters++;
+  }
+  if (!supportedClusters) {
+    state.reason = 'no-cross-view-material-match';
+    return state;
+  }
+  const detailLimit = Math.max(4, Math.ceil(occupiedFront * 0.12));
+  const surfaceOnly = new Uint8Array(front.clusterCount);
+  for (let cluster = 0; cluster < front.clusterCount; cluster++) if (!supported[cluster]) {
+    const detail = front.counts[cluster] <= detailLimit;
+    surfaceOnly[cluster] = detail ? 1 : 0;
+    state.unmatched.push({
+      cluster,
+      rgb: [front.centers[cluster * 3], front.centers[cluster * 3 + 1], front.centers[cluster * 3 + 2]],
+      pixels: front.counts[cluster],
+      surfaceOnly: detail,
+    });
+  }
+  state.surfaceOnly = surfaceOnly;
+  state.structuralColorAt = _buildStructuralColors(quant, front, surfaceOnly);
+  state.active = true;
+  state.reason = 'active';
+  _refreshMaterialEvidenceBytes(state);
+  return state;
+}
+function _materialViewEntry(material, view) {
+  return material && material.byId ? material.byId[view.id] : null;
+}
+function _materialMatchAt(material, view, frontCluster, sample) {
+  const entry = _materialViewEntry(material, view);
+  if (!material.active || !entry || !entry.usable || !material.supportedFront[frontCluster]) return null;
+  material.occupancyCompareWork = (material.occupancyCompareWork || 0) + 1;
+  if (!entry.supportedFront[frontCluster]) return 0;
+  const viewCluster = entry.ids[sample];
+  if (viewCluster === NO_MATERIAL) return 0;
+  return entry.compatibility[frontCluster * entry.clusterCount + viewCluster] ? 1 : 0;
+}
+function _recordMaterialCandidate(entry, sample, match) {
+  if (!entry || !entry.candidateMatchesBySample || !entry.candidateMismatchesBySample) return;
+  if (match) {
+    entry.candidateMatches++;
+    if (entry.candidateMatchesBySample[sample] < 65535) entry.candidateMatchesBySample[sample]++;
+  } else {
+    entry.candidateMismatches++;
+    if (entry.candidateMismatchesBySample[sample] < 65535) entry.candidateMismatchesBySample[sample]++;
+  }
+}
 function _nearestFrontColors(quant) {
   const { w, h, idxAt } = quant, nearest = new Int16Array(idxAt), queue = new Int32Array(w * h);
   let head = 0, tail = 0;
@@ -1257,7 +1629,31 @@ function _nearestFrontColors(quant) {
   }
   return nearest;
 }
-function buildHull(quant, depthState, silhouettes, config) {
+function _preflightMaterialOccupancy(quant, depthState, silhouettes, material) {
+  if (!material || !material.active) return material;
+  const D = Math.max(1, depthState.layers | 0);
+  const relief = (depthState.relief == null) ? 1 : Math.max(0, Math.min(1, depthState.relief));
+  const usableViews = material.views.filter(view => view.usable).length;
+  let work = 0;
+  for (let i = 0; i < quant.idxAt.length; i++) {
+    const frontColor = quant.idxAt[i];
+    if (frontColor < 0) continue;
+    const frontCluster = material.front.clusterAt[i];
+    const structuralColor = material.surfaceOnly[frontCluster] ? material.structuralColorAt[i] : frontColor;
+    const structuralCluster = structuralColor >= 0 ? material.front.paletteCluster[structuralColor] : NO_MATERIAL;
+    if (structuralCluster === NO_MATERIAL || !material.supportedFront[structuralCluster]) continue;
+    work += depthSpanAt(i, D, depthState.profile || null, relief) * usableViews;
+    if (material.compareWork + work > MAX_MATERIAL_COMPARE_WORK) break;
+  }
+  material.occupancyCompareWorkEstimate = work;
+  material.occupancyCompareWork = 0;
+  if (material.compareWork + work > MAX_MATERIAL_COMPARE_WORK) {
+    material.active = false;
+    material.reason = 'material-occupancy-budget';
+  }
+  return material;
+}
+function buildHull(quant, depthState, silhouettes, config, material) {
   const { idxAt, w: W, h: H } = quant;
   const D = Math.max(1, depthState.layers | 0);
   const relief = (depthState.relief == null) ? 1 : Math.max(0, Math.min(1, depthState.relief));
@@ -1270,11 +1666,22 @@ function buildHull(quant, depthState, silhouettes, config) {
     return { grid, dims: [W, H, D], voxels: 0, zeroTotalWeight: true };
   }
   const nearestColors = config.reconstruction.hardFrontConstraint ? null : _nearestFrontColors(quant);
+  if (material && material.active) {
+    material.acceptedVoxels = new Uint32Array(material.clusterCount);
+    material.acceptedMinZ = new Int16Array(material.clusterCount).fill(32767);
+    material.acceptedMaxZ = new Int16Array(material.clusterCount).fill(-1);
+  }
   let voxels = 0;
   for (let py = 0; py < H; py++) {
     for (let px = 0; px < W; px++) {
       const i = px + W * py;
-      const frontColor = idxAt[i], ci = frontColor >= 0 ? frontColor : (nearestColors && nearestColors[i]);
+      const frontColor = idxAt[i];
+      const frontCluster = material && material.active && frontColor >= 0 ? material.front.clusterAt[i] : NO_MATERIAL;
+      const structuralColor = frontCluster !== NO_MATERIAL && material.surfaceOnly[frontCluster]
+        ? material.structuralColorAt[i] : frontColor;
+      const evidenceCluster = material && material.active && structuralColor >= 0
+        ? material.front.paletteCluster[structuralColor] : frontCluster;
+      const ci = frontColor >= 0 ? structuralColor : (nearestColors && nearestColors[i]);
       if (ci == null || ci < 0 || (frontColor < 0 && (config.reconstruction.mode === 'strict' || config.reconstruction.hardFrontConstraint))) continue;
       const dz = frontColor >= 0 ? depthSpanAt(i, D, prof, relief) : D;
       const z0 = _depthStart(D, dz, depthState.mode, depthState.frontRatio);
@@ -1284,11 +1691,33 @@ function buildHull(quant, depthState, silhouettes, config) {
         let accepted = true;
         if (config.reconstruction.mode === 'strict') {
           for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
+          if (accepted && evidenceCluster !== NO_MATERIAL && material && material.active) {
+            let evidenceWeight = 0, compatibleWeight = 0;
+            for (const view of silhouettes.prepared) {
+              const sample = _viewSample(view, px, py, z);
+              const match = _materialMatchAt(material, view, evidenceCluster, sample);
+              if (match == null) continue;
+              const weight = _viewWeight(view, config)
+                * _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
+              evidenceWeight += weight;
+              compatibleWeight += weight * match;
+              const entry = _materialViewEntry(material, view);
+              _recordMaterialCandidate(entry, sample, match);
+            }
+            if (evidenceWeight > 0 && compatibleWeight / evidenceWeight < config.material.strength) accepted = false;
+          }
         } else {
           let score = frontColor >= 0 ? config.reconstruction.frontWeight : 0, total = config.reconstruction.frontWeight;
           for (const view of silhouettes.prepared) {
             const weight = _viewWeight(view, config), sample = _viewSample(view, px, py, z);
-            total += weight; score += weight * _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
+            let confidence = _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
+            const match = evidenceCluster === NO_MATERIAL ? null : _materialMatchAt(material, view, evidenceCluster, sample);
+            if (match != null) {
+              confidence *= (1 - config.material.strength) + config.material.strength * match;
+              const entry = _materialViewEntry(material, view);
+              _recordMaterialCandidate(entry, sample, match);
+            }
+            total += weight; score += weight * confidence;
           }
           const threshold = config.reconstruction.threshold <= 1
             ? config.reconstruction.threshold * total : config.reconstruction.threshold;
@@ -1296,14 +1725,21 @@ function buildHull(quant, depthState, silhouettes, config) {
         }
         if (!accepted) continue;
         grid[px + W * (my + H * z)] = ci; voxels++;
+        if (evidenceCluster !== NO_MATERIAL && material && material.active) {
+          material.acceptedVoxels[evidenceCluster]++;
+          if (z < material.acceptedMinZ[evidenceCluster]) material.acceptedMinZ[evidenceCluster] = z;
+          if (z > material.acceptedMaxZ[evidenceCluster]) material.acceptedMaxZ[evidenceCluster] = z;
+        }
       }
     }
   }
-  return { grid, dims: [W, H, D], voxels };
+  return { grid, dims: [W, H, D], voxels, material };
 }
-function calculateOccupancy(quant, config, silhouettes, depthState) {
+function calculateOccupancy(quant, config, silhouettes, depthState, material) {
   const useHull = silhouettes.prepared.length > 0 || config.reconstruction.mode === 'weighted';
-  return useHull ? buildHull(quant, depthState, silhouettes, config) : buildGrid(quant, depthState);
+  const occupancy = useHull ? buildHull(quant, depthState, silhouettes, config, material) : buildGrid(quant, depthState);
+  occupancy.material = material;
+  return occupancy;
 }
 
 function _isExposed(grid, dims, x, y, z, dx, dy, dz) {
@@ -1313,12 +1749,28 @@ function _isExposed(grid, dims, x, y, z, dx, dy, dz) {
 }
 function fuseVoxelColors(occupancy, quant, silhouettes, config) {
   const sourceGrid = occupancy.grid, dims = occupancy.dims;
+  const material = occupancy.material;
   const sideViews = silhouettes.prepared.filter(view => view.role === 'side');
   const topViews = silhouettes.prepared.filter(view => view.role === 'top');
   const usableAuxiliary = sideViews.concat(topViews).some(view => view.confidence > 0 && !!view.bounds);
   const effectiveSide = config.color.mode === 'auxiliary' && usableAuxiliary ? 'auxiliary' : config.color.side;
   const effectiveBack = config.color.back;
   const [W, H, D] = dims;
+  const frontmostZ = new Int16Array(W * H).fill(-1);
+  for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (sourceGrid[x + W * (y + H * z)] >= 0) frontmostZ[x + W * y] = z;
+  }
+  if (material) {
+    material.decorativeFrontFaceArea = 0;
+    if (material.active) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const z = frontmostZ[x + W * y];
+      if (z < 0) continue;
+      const py = H - 1 - y, frontIndex = quant.idxAt[x + W * py];
+      if (frontIndex < 0) continue;
+      const cluster = material.front.clusterAt[x + W * py];
+      if (cluster !== NO_MATERIAL && material.surfaceOnly[cluster]) material.decorativeFrontFaceArea++;
+    }
+  }
   const palette = quant.palette.map(color => [...color]);
   const colorKeys = new Map(palette.map((color, index) => [color.join(','), index]));
   const maxColors = Math.max(1, config.palette.colors | 0);
@@ -1352,7 +1804,14 @@ function fuseVoxelColors(occupancy, quant, silhouettes, config) {
   };
   const faceRgb = (x, y, z, dir, baseIndex) => {
     const base = quant.palette[baseIndex] || [200, 200, 200];
-    if (dir === 4) return base;
+    if (dir === 4) {
+      const py = H - 1 - y, frontIndex = quant.idxAt[x + W * py];
+      if (material && material.active && frontIndex >= 0) {
+        const cluster = material.front.clusterAt[x + W * py];
+        if (z === frontmostZ[x + W * y] && cluster !== NO_MATERIAL && material.surfaceOnly[cluster]) return quant.palette[frontIndex] || base;
+      }
+      return base;
+    }
     if (dir === 5) return effectiveBack === 'darken' ? darken(base) : base;
     const py = H - 1 - y;
     if (effectiveSide === 'auxiliary') {
@@ -1405,8 +1864,19 @@ function _iou(a, b) {
   }
   return { iou: union ? intersection / union : 1, residual: union ? mismatch / union : 0 };
 }
+function _profileResolution(sourceWidth, gridDepth) {
+  if (!Number.isSafeInteger(sourceWidth) || sourceWidth <= 0) return null;
+  return {
+    sourceWidth,
+    gridDepth,
+    compressionRatio: gridDepth / sourceWidth,
+    downsampled: gridDepth < sourceWidth,
+    label: `Profile ${sourceWidth} → ${gridDepth} layers`,
+  };
+}
 function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, occupancy) {
   const warnings = [], views = [];
+  const material = occupancy && occupancy.material;
   const frontMask = new Uint8Array(quant.w * quant.h);
   for (let i = 0; i < frontMask.length; i++) frontMask[i] = quant.idxAt[i] >= 0 ? 1 : 0;
   if (!_maskBounds(frontMask, quant.w, quant.h)) warnings.push({ code: 'EMPTY_FRONT', stage: 'input', severity: 'error', message: 'The front silhouette is empty.' });
@@ -1415,12 +1885,40 @@ function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, 
     warnings.push({ code: issue.code, stage: 'input', severity: issue.code === 'MALFORMED_VIEW' ? 'error' : 'warning', view: input.id, message: issue.message });
   }
   if (occupancy && occupancy.zeroTotalWeight) warnings.push({ code: 'ZERO_TOTAL_WEIGHT', stage: 'reconstruction', severity: 'error', message: 'Weighted reconstruction has zero total effective view weight.' });
+  if (material && material.effective && material.reason === 'material-evidence-budget') {
+    warnings.push({ code: 'MATERIAL_EVIDENCE_BUDGET', stage: 'material', severity: 'warning', message: 'Material evidence exceeded its bounded memory budget; alpha-only reconstruction was preserved.' });
+  } else if (material && material.effective && material.reason === 'material-compare-budget') {
+    warnings.push({ code: 'MATERIAL_COMPARE_BUDGET', stage: 'material', severity: 'warning', message: 'Material clustering exceeded its bounded comparison budget; alpha-only reconstruction was preserved.' });
+  } else if (material && material.effective && material.reason === 'material-occupancy-budget') {
+    warnings.push({ code: 'MATERIAL_OCCUPANCY_BUDGET', stage: 'material', severity: 'warning', message: 'Material occupancy lookup exceeded its bounded comparison budget; alpha-only reconstruction was preserved.' });
+  } else if (material && material.effective && (material.reason === 'mask-only' || material.reason === 'missing-rgb-evidence')) {
+    const message = material.reason === 'mask-only'
+      ? 'Auxiliary views are explicitly mask-only; alpha-only reconstruction was preserved.'
+      : 'Auxiliary views contain no opaque material samples; alpha-only reconstruction was preserved.';
+    warnings.push({ code: 'MATERIAL_RGB_MISSING', stage: 'material', severity: 'warning', message });
+  } else if (material && material.requested && material.reason === 'zero-strength') {
+    warnings.push({ code: 'MATERIAL_STRENGTH_ZERO', stage: 'material', severity: 'info', message: 'Material influence is zero; alpha-only reconstruction is active.' });
+  } else if (material && material.effective && material.reason === 'no-effective-material-weight') {
+    warnings.push({ code: 'MATERIAL_WEIGHT_ZERO', stage: 'material', severity: 'warning', message: 'Auxiliary RGB has zero effective confidence/role weight; alpha-only reconstruction was preserved.' });
+  } else if (material && material.effective && material.reason === 'no-cross-view-material-match') {
+    warnings.push({ code: 'MATERIAL_MISMATCH_GHOST_RISK', stage: 'material', severity: 'warning', message: 'Silhouettes overlap, but no front material matches auxiliary RGB. IoU alone cannot prove semantic alignment; ghost volumes remain possible.' });
+  }
+  if (material && material.active && material.unmatched.some(item => item.surfaceOnly)) {
+    warnings.push({ code: 'SURFACE_ONLY_DETAILS', stage: 'material', severity: 'warning', message: 'Unmatched small front materials were kept on exposed front faces and replaced by nearby structural material in the interior.' });
+  }
+  if (material && material.active && material.compareBudgetExceeded) {
+    warnings.push({ code: 'MATERIAL_COMPARE_BUDGET', stage: 'material', severity: 'warning', message: 'One oversized auxiliary material view was ignored after reaching the bounded comparison budget.' });
+  }
   let occupied = 0;
   for (let i = 0; i < grid.length; i++) if (grid[i] >= 0) occupied++;
   if (!occupied && _maskBounds(frontMask, quant.w, quant.h)) warnings.push({ code: 'EMPTY_RECONSTRUCTION', stage: 'reconstruction', severity: 'error', message: 'The supplied silhouettes contradict each other and removed all voxels.' });
   const frontRows = _projectAxis(frontMask, quant.w, quant.h, 'row');
   const frontCols = _projectAxis(frontMask, quant.w, quant.h, 'col');
   for (const view of silhouettes.prepared) {
+    const sourceInput = allViews.find(input => input && input.id === view.id);
+    const profileResolution = view.role === 'side'
+      ? _profileResolution(sourceInput && sourceInput.pixels && sourceInput.pixels.w, dims[2]) : null;
+    const materialView = _materialViewEntry(material, view);
     const projected = new Uint8Array(view.w * view.h);
     for (let z = 0; z < dims[2]; z++) for (let y = 0; y < dims[1]; y++) for (let x = 0; x < dims[0]; x++) {
       if (grid[x + dims[0] * (y + dims[1] * z)] < 0) continue;
@@ -1437,9 +1935,97 @@ function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, 
     else if (inputOverlap < 0.25) warnings.push({ code: 'LOW_SHARED_AXIS_OVERLAP', stage: 'input', severity: 'warning', view: view.id, iou: inputOverlap, message: `The ${view.role} view does not align on its shared front axis.` });
     if (!empty && quality.iou < 0.25) warnings.push({ code: 'LOW_OVERLAP', stage: 'projection', severity: 'warning', view: view.id, iou: quality.iou, message: `The ${view.role} view has low projected overlap.` });
     if (quality.residual > 0.75) warnings.push({ code: 'VIEW_CONFLICT', stage: 'projection', severity: 'warning', view: view.id, residual: quality.residual, message: `The ${view.role} view is the strongest reconstruction conflict.` });
-    views.push({ id: view.id, role: view.role, confidence: view.confidence, inputOverlap, iou: quality.iou, residual: quality.residual, w: view.w, h: view.h, projected, overlay });
+    if (profileResolution && profileResolution.downsampled) {
+      warnings.push({
+        code: 'PROFILE_DOWNSAMPLED',
+        stage: 'resolution',
+        severity: 'warning',
+        view: view.id,
+        sourceWidth: profileResolution.sourceWidth,
+        gridDepth: profileResolution.gridDepth,
+        compressionRatio: profileResolution.compressionRatio,
+        message: `${profileResolution.label}; source-resolution profile detail is downsampled even when grid projection IoU is exact.`,
+      });
+    }
+    const materialTotal = materialView ? materialView.compatiblePixels + materialView.mismatchPixels : 0;
+    const candidateTotal = materialView ? materialView.candidateMatches + materialView.candidateMismatches : 0;
+    const materialCoverage = materialTotal ? materialView.compatiblePixels / materialTotal : null;
+    const materialMismatchCoverage = materialTotal ? materialView.mismatchPixels / materialTotal : null;
+    const materialEvaluated = !!(materialView && materialView.usable);
+    const materialCandidateCompatibility = materialEvaluated ? (candidateTotal ? materialView.candidateMatches / candidateTotal : 0) : null;
+    const materialOverlay = materialEvaluated ? new Uint8Array(view.mask.length) : null;
+    if (materialOverlay) for (let i = 0; i < materialOverlay.length; i++) {
+      const matched = materialView.candidateMatchesBySample[i] > 0;
+      const mismatched = materialView.candidateMismatchesBySample[i] > 0;
+      materialOverlay[i] = matched ? (mismatched ? 3 : 1) : (mismatched ? 2 : 0);
+    }
+    if (materialView) materialView.diagnosticOverlay = materialOverlay;
+    if (material && material.active && materialView && materialView.usable
+      && (materialMismatchCoverage > 0.5 || (candidateTotal > 0 && materialCandidateCompatibility < 0.9))) {
+      warnings.push({ code: 'MATERIAL_MISMATCH_GHOST_RISK', stage: 'material', severity: 'warning', view: view.id, coverage: materialCandidateCompatibility, message: `The ${view.role} silhouette aligns, but front-to-auxiliary material candidates conflict. Inspect the material overlay; silhouette IoU is not semantic alignment and alpha-only fusion can create ghost volume.` });
+    }
+    const materialDiagnostic = {
+      eligible: materialView ? !!materialView.eligible : view.materialEvidence !== false,
+      evaluated: materialEvaluated,
+      applied: !!(material && material.active && materialView && materialView.usable),
+      compatible: materialView ? materialView.candidateMatches : 0,
+      incompatible: materialView ? materialView.candidateMismatches : 0,
+      compatibility: materialCandidateCompatibility,
+    };
+    views.push({
+      id: view.id,
+      role: view.role,
+      confidence: view.confidence,
+      inputOverlap,
+      iou: quality.iou,
+      residual: quality.residual,
+      materialCoverage,
+      materialMismatchCoverage,
+      materialCandidateCompatibility,
+      materialUsable: !!(materialView && materialView.usable),
+      material: materialDiagnostic,
+      profileResolution,
+      w: view.w,
+      h: view.h,
+      projected,
+      overlay,
+      materialOverlay,
+      materialEvidenceOverlay: materialView && materialView.overlay,
+    });
   }
-  return { warnings, views, hasErrors: warnings.some(w => w.severity === 'error') };
+  return {
+    warnings,
+    views,
+    material: material ? {
+      enabled: material.enabled,
+      requested: material.requested,
+      effective: material.effective,
+      active: material.active,
+      reason: material.reason,
+      tolerance: material.tolerance,
+      strength: material.strength,
+      clusterCount: material.clusterCount,
+      clipped: material.clipped,
+      memoryBytes: material.memoryBytes,
+      compareWork: material.compareWork || 0,
+      occupancyCompareWork: material.occupancyCompareWork || 0,
+      occupancyCompareWorkEstimate: material.occupancyCompareWorkEstimate || 0,
+      decorativeFrontFaceArea: material.decorativeFrontFaceArea || 0,
+      unmatchedFrontMaterials: material.unmatched,
+      clusters: material.front ? Array.from({ length: material.front.clusterCount }, (_, cluster) => ({
+        cluster,
+        rgb: [material.front.centers[cluster * 3], material.front.centers[cluster * 3 + 1], material.front.centers[cluster * 3 + 2]],
+        frontPixels: material.front.counts[cluster],
+        supported: !!(material.supportedFront && material.supportedFront[cluster]),
+        surfaceOnly: !!(material.surfaceOnly && material.surfaceOnly[cluster]),
+        structuralVoxels: material.acceptedVoxels ? material.acceptedVoxels[cluster] : null,
+        acceptedVoxels: material.acceptedVoxels ? material.acceptedVoxels[cluster] : null,
+        acceptedZSpan: material.acceptedVoxels && material.acceptedVoxels[cluster]
+          ? [material.acceptedMinZ[cluster], material.acceptedMaxZ[cluster]] : null,
+      })) : [],
+    } : null,
+    hasErrors: warnings.some(w => w.severity === 'error'),
+  };
 }
 
 function _countExposedFaces(grid, dims) {
@@ -1490,7 +2076,10 @@ function voxelize(pixels, opts, views) {
   _measureStage(stageMs, 'validateViewBudgets', () => _assertAuxiliaryBudgets(viewInputs, config.silhouette));
   const depthState = _measureStage(stageMs, 'prepareDepth', () => createDepthState(quant, config, viewInputs));
   const silhouettes = _measureStage(stageMs, 'prepareSilhouettes', () => prepareSilhouettes(config, { views: viewInputs }, [quant.w, quant.h, depthState.layers]));
-  const occupancy = _measureStage(stageMs, 'calculateOccupancy', () => calculateOccupancy(quant, config, silhouettes, depthState));
+  const material = _measureStage(stageMs, 'prepareMaterials', () => prepareMaterialEvidence(quant, silhouettes, config));
+  _measureStage(stageMs, 'preflightMaterialOccupancy', () => _preflightMaterialOccupancy(quant, depthState, silhouettes, material));
+  const occupancy = _measureStage(stageMs, 'calculateOccupancy', () => calculateOccupancy(quant, config, silhouettes, depthState, material));
+  _refreshMaterialEvidenceBytes(material);
   if (occupancy.voxels > MAX_MESH_VOXELS) throw _budgetError('MESH_BUDGET_EXCEEDED', `Occupied volume exceeds the ${MAX_MESH_VOXELS}-voxel meshing budget`);
   const exposedFaceCount = _measureStage(stageMs, 'validateMeshBudget', () => {
     const count = _countExposedFaces(occupancy.grid, occupancy.dims);
@@ -1501,9 +2090,23 @@ function voxelize(pixels, opts, views) {
   const { grid, dims, voxels } = { ...occupancy, grid: colored.grid };
   const mesh = _measureStage(stageMs, 'extractMesh', () => extractMesh(grid, dims, config, colored.faceColorAt, exposedFaceCount));
   const diagnostics = _measureStage(stageMs, 'diagnostics', () => buildDiagnostics(quant, grid, dims, silhouettes, depthState, viewInputs, occupancy));
+  _refreshMaterialEvidenceBytes(material);
+  if (material.memoryBytes > MAX_MATERIAL_EVIDENCE_BYTES) throw _budgetError('MATERIAL_EVIDENCE_BUDGET_EXCEEDED', 'Tracked material evidence exceeded its exact 8 MiB cap');
+  if (diagnostics.material) diagnostics.material.memoryBytes = material.memoryBytes;
   for (const view of diagnostics.views) {
     const preview = silhouettes.previews.byId[view.id];
-    if (preview) { preview.projected = view.projected; preview.overlay = view.overlay; preview.iou = view.iou; preview.residual = view.residual; }
+    if (preview) {
+      preview.projected = view.projected;
+      preview.overlay = view.overlay;
+      preview.materialOverlay = view.materialOverlay;
+      preview.materialEvidenceOverlay = view.materialEvidenceOverlay;
+      preview.iou = view.iou;
+      preview.residual = view.residual;
+      preview.materialCoverage = view.materialCoverage;
+      preview.materialMismatchCoverage = view.materialMismatchCoverage;
+      preview.materialCandidateCompatibility = view.materialCandidateCompatibility;
+      preview.material = view.material;
+    }
   }
   const faceEstimateBytes = mesh.greedyFacesList.length * 152 + (mesh.naiveFacesList ? mesh.naiveFacesList.length * 152 : 0);
   const memoryEstimateBytes = _estimateMemoryBytes({
@@ -1516,8 +2119,8 @@ function voxelize(pixels, opts, views) {
     topMask: silhouettes.topMask,
     topCol: silhouettes.topCol,
     viewData: silhouettes.prepared.map(view => [view.mask, view.confidenceMap, view.edgeDistance, view.colors]),
-    diagnosticData: diagnostics.views.map(view => [view.projected, view.overlay]),
-  }) + faceEstimateBytes;
+    diagnosticData: diagnostics.views.map(view => [view.projected, view.overlay, view.materialOverlay]),
+  }) + faceEstimateBytes + material.memoryBytes;
   return {
     configVersion: CONFIG_VERSION,
     config,
@@ -1535,6 +2138,13 @@ function voxelize(pixels, opts, views) {
       memoryEstimateBytes,
       memoryEstimateMiB: Math.round((memoryEstimateBytes / (1024 * 1024)) * 1000) / 1000,
       faceEstimateBytes,
+      materialEvidenceBytes: material.memoryBytes,
+      materialPrepareCompareWork: material.compareWork || 0,
+      materialOccupancyCompareWork: material.occupancyCompareWork || 0,
+      materialOccupancyCompareWorkEstimate: material.occupancyCompareWorkEstimate || 0,
+      materialCompareWork: (material.compareWork || 0) + (material.occupancyCompareWork || 0),
+      transformedViewCells: silhouettes.budget.transformedCells,
+      transformedViewPeakBytes: silhouettes.budget.peakBytes,
       bytesPerVoxel: voxels ? Math.round(memoryEstimateBytes / voxels) : 0,
       viewBytes: Object.assign(Object.create(null), Object.fromEntries(silhouettes.prepared.map(view => [view.id, _estimateMemoryBytes({ mask: view.mask, confidence: view.confidenceMap, distance: view.edgeDistance, colors: view.colors })]))),
     },
@@ -1587,6 +2197,8 @@ function annotateAO(faces, grid, dims, strength) {
 const voxelRoot = (typeof window !== 'undefined') ? window : globalThis;
 voxelRoot.Voxel = {
   CONFIG_VERSION,
+  MAX_DEPTH_LAYERS,
+  MAX_VOXEL_COUNT,
   canvasToPixels,
   validatePixels,
   preprocessPixels,

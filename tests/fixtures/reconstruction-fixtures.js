@@ -42,6 +42,19 @@ const disconnectedUnequal = makePixels(7, 3, (x, y) => {
   return [0, 0, 0, 0];
 });
 
+// One connected alpha silhouette in both views. The front staff touches the
+// body, but its yellow material is only visible in a narrow side Z band.
+const connectedMaterialFront = makePixels(5, 4, (x, y) => {
+  if (x >= 2) return x === 3 && y === 1 ? [5, 5, 8, 255] : [150, 35, 170, 255];
+  if (x <= 1 && y >= 1) return [245, 190, 10, 255];
+  return [0, 0, 0, 0];
+});
+const connectedMaterialSide = makePixels(6, 4, (z, y) => {
+  if (z >= 1) return [150, 35, 170, 255];
+  if (z === 0 && y >= 1) return [245, 190, 10, 255];
+  return [0, 0, 0, 0];
+});
+
 const disconnectedLegacyGrids = {
   dt: [0,0,-1,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1,0,0,-1,-1,-1,-1,-1],
   combo: [-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,-1,0,0,0,-1,-1,-1,1,0,0,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,-1],
@@ -59,6 +72,8 @@ const legacyDepthGrids = {
 
 module.exports = {
   clonePixels,
+  connectedMaterialFront,
+  connectedMaterialSide,
   disconnectedLegacyGrids,
   disconnectedUnequal,
   depthMapGradient,

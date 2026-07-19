@@ -24,6 +24,8 @@ jobs:
       - name: Check browser scripts
         run: |
           node --check voxelizer/app.js
+          node --check voxelizer/profile-depth.js
+          node --check voxelizer/viewport.js
           node --check voxelizer/voxel.js
           node --check voxelizer/voxio.js
           node --check voxelizer/worker.js

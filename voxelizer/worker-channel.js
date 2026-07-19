@@ -1,5 +1,39 @@
 /* Recoverable worker channel with immutable jobs and incarnation-safe events. */
 (function (root) {
+  const DEFAULT_MAX_SYNCHRONOUS_WORK = 2 * 1024 * 1024;
+
+  function positiveInteger(value, fallback) {
+    const number = Math.floor(Number(value));
+    return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+  }
+
+  function fallbackWork(job) {
+    const pixels = job && job.pixels;
+    const w = positiveInteger(pixels && pixels.w, 1);
+    const h = positiveInteger(pixels && pixels.h, 1);
+    const opts = job && job.opts || {};
+    const requestedDepth = opts.depth && typeof opts.depth === 'object' ? opts.depth.layers : opts.depth;
+    const depth = positiveInteger(requestedDepth, 1);
+    if (w > Math.floor(Number.MAX_SAFE_INTEGER / h) || w * h > Math.floor(Number.MAX_SAFE_INTEGER / depth)) return Number.POSITIVE_INFINITY;
+    return w * h * depth;
+  }
+
+  function fallbackBudgetError(work, limit, reason) {
+    const error = new RangeError(`Synchronous fallback refused ${work} logical cells; maximum is ${limit}`);
+    error.code = 'WORKER_FALLBACK_WORK_EXCEEDED';
+    error.stage = 'runtime';
+    error.diagnostic = {
+      code: error.code,
+      stage: error.stage,
+      severity: 'error',
+      work,
+      limit,
+      reason,
+      message: error.message,
+    };
+    return error;
+  }
+
   function create(options) {
     const workerUrl = options.workerUrl || 'worker.js';
     const voxelize = options.voxelize;
@@ -7,6 +41,7 @@
     const WorkerCtor = options.WorkerCtor === undefined ? root.Worker : options.WorkerCtor;
     const now = options.now || Date.now;
     const backoffBaseMs = options.backoffBaseMs == null ? 500 : Math.max(0, options.backoffBaseMs);
+    const maxSynchronousWork = positiveInteger(options.maxSynchronousWork, DEFAULT_MAX_SYNCHRONOUS_WORK);
     let worker = null, nextJobId = 0, generation = 0, incarnation = 0, failures = 0, retryAfter = 0;
     const pending = new Map();
 
@@ -19,6 +54,8 @@
       if (!instance || worker === instance) worker = null;
     }
     function fallback(job, reason) {
+      const work = fallbackWork(job);
+      if (work > maxSynchronousWork) throw fallbackBudgetError(work, maxSynchronousWork, reason);
       const result = voxelize(job.pixels, job.opts, job.views);
       if (!validVoxelResult(result)) throw new Error('Main-thread voxelizer returned an invalid result');
       result.metrics.workerMode = 'main-thread';
@@ -99,7 +136,7 @@
     function run(pixels, opts, views) {
       const snapshot = transfer.clone({ pixels, opts, views: views || {} });
       const active = ensureWorker();
-      if (!active) return Promise.resolve(fallback(snapshot, typeof WorkerCtor !== 'function' ? 'worker-unavailable' : 'worker-retry-cooldown'));
+      if (!active) return Promise.resolve().then(() => fallback(snapshot, typeof WorkerCtor !== 'function' ? 'worker-unavailable' : 'worker-retry-cooldown'));
       return new Promise((resolve, reject) => {
         const jobId = `job-${++nextJobId}`;
         const job = { jobId, resolve, reject, snapshot, generation, incarnation };
@@ -122,5 +159,5 @@
     }
     return { run, cancelPending, dispose, status: () => ({ worker: !!worker, pending: pending.size, failures, retryAfter, generation, incarnation }) };
   }
-  root.VoxelWorkerChannel = { create };
+  root.VoxelWorkerChannel = { DEFAULT_MAX_SYNCHRONOUS_WORK, create, fallbackWork };
 })(typeof window !== 'undefined' ? window : globalThis);

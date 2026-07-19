@@ -26,15 +26,91 @@ function loadScript(file, context) {
   vm.runInContext(source, context, { filename: file });
 }
 
+function loadViewportRuntime() {
+  const context = { window: {}, console };
+  vm.createContext(context);
+  loadScript('viewport.js', context);
+  return context.window.VoxelViewport;
+}
+
+function loadProfileDepthRuntime() {
+  const context = { window: {}, console };
+  vm.createContext(context);
+  loadScript('profile-depth.js', context);
+  return context.window.VoxelProfileDepth;
+}
+
+function fakeVector(x = 0, y = 0, z = 0) {
+  return { x, y, z, set(nx, ny, nz) { this.x = nx; this.y = ny; this.z = nz; } };
+}
+
+function fakeCamera(kind) {
+  return {
+    kind,
+    position: fakeVector(),
+    up: fakeVector(0, 1, 0),
+    fov: 42,
+    aspect: 1,
+    zoom: 1,
+    near: 0.1,
+    far: 1000,
+    projectionUpdates: 0,
+    lookAtTarget: null,
+    lookAt(target) { this.lookAtTarget = [target.x, target.y, target.z]; },
+    updateProjectionMatrix() { this.projectionUpdates++; },
+  };
+}
+
+function fakeCameraHarness(dimensions = [44, 44, 44], aspect = 1) {
+  const Viewport = loadViewportRuntime();
+  const perspectiveCamera = fakeCamera('perspective');
+  const orthographicCamera = fakeCamera('orthographic');
+  const controls = {
+    object: null,
+    target: fakeVector(),
+    enableRotate: true,
+    enablePan: true,
+    enableZoom: true,
+    autoRotate: true,
+    updates: 0,
+    update() { this.updates++; },
+  };
+  const controller = Viewport.createCameraController({ perspectiveCamera, orthographicCamera, controls, dimensions, aspect, autoRotate: true });
+  return { Viewport, controller, perspectiveCamera, orthographicCamera, controls };
+}
+
+function assertModelInsideClip(camera, controls, dims) {
+  const Viewport = loadViewportRuntime();
+  const position = [camera.position.x, camera.position.y, camera.position.z];
+  const target = [controls.target.x, controls.target.y, controls.target.z];
+  const distance = Math.hypot(position[0] - target[0], position[1] - target[1], position[2] - target[2]);
+  const radius = Viewport.boundingSphere(dims).radius;
+  assert.ok(camera.near < distance - radius + 1e-9, `near ${camera.near} should be less than ${distance - radius}`);
+  assert.ok(camera.far > distance + radius - 1e-9, `far ${camera.far} should be greater than ${distance + radius}`);
+}
+
+function assertModelInsideOrthoFrustum(camera, dims, mode) {
+  const [x, y, z] = dims;
+  const halfWidth = (camera.right - camera.left) / 2;
+  const halfHeight = (camera.top - camera.bottom) / 2;
+  let contentWidth = x, contentHeight = y;
+  if (mode === 'profile') contentWidth = z;
+  else if (mode === 'top') contentHeight = z;
+  assert.ok(halfWidth >= contentWidth / 2, `frustum half-width ${halfWidth} should cover ${contentWidth / 2}`);
+  assert.ok(halfHeight >= contentHeight / 2, `frustum half-height ${halfHeight} should cover ${contentHeight / 2}`);
+}
+
 function loadWorkerRuntime() {
   const messages = [];
+  const transferLists = [];
   const context = {
     console,
     importScripts(...files) {
       for (const file of files) loadScript(file, context);
     },
-    postMessage(message) {
+    postMessage(message, transferList) {
       messages.push(message);
+      transferLists.push(transferList || []);
     },
   };
   context.self = context;
@@ -45,6 +121,264 @@ function loadWorkerRuntime() {
       context.onmessage({ data });
       return messages.pop();
     },
+    takeTransferList() {
+      return transferLists.pop();
+    },
+  };
+}
+
+function fakeElement(id) {
+  const children = [];
+  const listeners = {};
+  const el = {
+    id,
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    disabled: false,
+    hidden: false,
+    style: {},
+    className: '',
+    classList: {
+      toggle(cls, force) {
+        const classes = new Set((el.className || '').split(/\s+/).filter(Boolean));
+        if (force === undefined) {
+          if (classes.has(cls)) classes.delete(cls); else classes.add(cls);
+        } else if (force) {
+          classes.add(cls);
+        } else {
+          classes.delete(cls);
+        }
+        el.className = [...classes].join(' ');
+      },
+      remove(cls) { el.classList.toggle(cls, false); },
+      add(cls) { el.classList.toggle(cls, true); },
+      contains(cls) { return (el.className || '').split(/\s+/).filter(Boolean).includes(cls); },
+    },
+    dataset: {},
+    children,
+    replaceChildren(...newChildren) { children.length = 0; children.push(...newChildren); },
+    appendChild(child) { children.push(child); return child; },
+    append(...nodes) { children.push(...nodes); },
+    removeChild(child) { const i = children.indexOf(child); if (i >= 0) children.splice(i, 1); },
+    addEventListener(type, handler) { (listeners[type] ||= []).push(handler); },
+    removeEventListener() {},
+    getContext() {
+      return {
+        clearRect() {}, fillRect() {}, drawImage() {}, fillText() {}, strokeRect() {},
+        beginPath() {}, moveTo() {}, lineTo() {}, quadraticCurveTo() {}, closePath() {},
+        fill() {}, arc() {}, scale() {}, imageSmoothingEnabled: false,
+      };
+    },
+    getAttribute(name) { return el.dataset[name] || null; },
+    setAttribute(name, value) { el.dataset[name] = value; },
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+    focus() {},
+    click() {},
+    getBoundingClientRect() { return { width: 800, height: 600 }; },
+  };
+  return el;
+}
+
+function fakeDocument() {
+  const elements = new Map();
+  return {
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, fakeElement(id));
+      return elements.get(id);
+    },
+    createElement(tag) { return fakeElement(tag); },
+    querySelectorAll() { return []; },
+    querySelector(selector) {
+      if (selector === '.window') {
+        if (!elements.has('window')) elements.set('window', fakeElement('window'));
+        return elements.get('window');
+      }
+      return null;
+    },
+    body: fakeElement('body'),
+  };
+}
+
+function fakeVector3(x = 0, y = 0, z = 0) {
+  return { x, y, z, set(nx, ny, nz) { this.x = nx; this.y = ny; this.z = nz; } };
+}
+
+function FakePerspectiveCamera(fov, aspect, near, far) {
+  this.kind = 'perspective';
+  this.position = fakeVector3();
+  this.up = fakeVector3(0, 1, 0);
+  this.fov = fov;
+  this.aspect = aspect;
+  this.near = near;
+  this.far = far;
+  this.zoom = 1;
+  this.projectionUpdates = 0;
+  this.lookAtTarget = null;
+}
+FakePerspectiveCamera.prototype.lookAt = function(target) { this.lookAtTarget = [target.x, target.y, target.z]; };
+FakePerspectiveCamera.prototype.updateProjectionMatrix = function() { this.projectionUpdates++; };
+
+function FakeOrthographicCamera(left, right, top, bottom, near, far) {
+  this.kind = 'orthographic';
+  this.position = fakeVector3();
+  this.up = fakeVector3(0, 1, 0);
+  this.left = left;
+  this.right = right;
+  this.top = top;
+  this.bottom = bottom;
+  this.near = near;
+  this.far = far;
+  this.zoom = 1;
+  this.projectionUpdates = 0;
+  this.lookAtTarget = null;
+}
+FakeOrthographicCamera.prototype.lookAt = function(target) { this.lookAtTarget = [target.x, target.y, target.z]; };
+FakeOrthographicCamera.prototype.updateProjectionMatrix = function() { this.projectionUpdates++; };
+
+function FakeOrbitControls(camera, domElement) {
+  this.object = camera;
+  this.target = fakeVector3();
+  this.enableDamping = false;
+  this.dampingFactor = 0;
+  this.autoRotate = false;
+  this.autoRotateSpeed = 0;
+}
+FakeOrbitControls.prototype.update = function() {};
+
+function FakeGroup() {
+  this.children = [];
+  this.position = fakeVector3();
+  this.scale = { setScalar(k) { this.k = k; } };
+}
+FakeGroup.prototype.add = function(child) { this.children.push(child); };
+FakeGroup.prototype.remove = function(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); };
+
+function FakeBufferGeometry() {
+  this.attributes = {};
+  this.index = null;
+}
+FakeBufferGeometry.prototype.setAttribute = function(name, attr) { this.attributes[name] = attr; };
+FakeBufferGeometry.prototype.setIndex = function(idx) { this.index = idx; };
+FakeBufferGeometry.prototype.dispose = function() {};
+
+function FakeFloat32BufferAttribute(array, itemSize) {
+  this.array = array;
+  this.itemSize = itemSize;
+}
+FakeFloat32BufferAttribute.prototype.dispose = function() {};
+
+function FakeMeshBasicMaterial(opts) {
+  this.opts = opts || {};
+  this.side = this.opts.side;
+}
+FakeMeshBasicMaterial.prototype.dispose = function() {};
+
+function FakeLineBasicMaterial(opts) { this.opts = opts || {}; }
+FakeLineBasicMaterial.prototype.dispose = function() {};
+
+function FakeMesh(geo, mat) {
+  this.kind = 'mesh';
+  this.geometry = geo;
+  this.material = mat;
+  this.visible = true;
+  this.position = fakeVector3();
+}
+FakeMesh.prototype.dispose = function() {
+  if (this.geometry && this.geometry.dispose) this.geometry.dispose();
+  if (this.material && this.material.dispose) this.material.dispose();
+};
+
+function FakeLineSegments(geo, mat) {
+  this.kind = 'wire';
+  this.geometry = geo;
+  this.material = mat;
+  this.visible = true;
+  this.position = fakeVector3();
+}
+FakeLineSegments.prototype.dispose = function() {
+  if (this.geometry && this.geometry.dispose) this.geometry.dispose();
+  if (this.material && this.material.dispose) this.material.dispose();
+};
+
+function FakeWebGLRenderer() {
+  this.domElement = fakeElement('renderer-dom');
+  this.domElement.width = 800;
+  this.domElement.height = 600;
+  this.domElement.clientWidth = 800;
+  this.domElement.clientHeight = 600;
+}
+FakeWebGLRenderer.prototype.setPixelRatio = function() {};
+FakeWebGLRenderer.prototype.setSize = function() {};
+FakeWebGLRenderer.prototype.render = function() {};
+
+function FakeVector3(x, y, z) { this.x = x; this.y = y; this.z = z; this.normalize = function() {}; }
+
+function FakeGridHelper() { this.position = fakeVector3(); }
+
+function FakeScene() { this.add = function() {}; }
+
+function loadAppRuntime() {
+  const context = {};
+  context.window = context;
+  context.document = fakeDocument();
+  context.addEventListener = function() {};
+  context.removeEventListener = function() {};
+  context.setTimeout = function(fn, ms) { if (typeof fn === 'function') fn(); return 0; };
+  context.clearTimeout = function() {};
+  context.setInterval = function() { return 0; };
+  context.clearInterval = function() {};
+  context.requestAnimationFrame = function() {};
+  context.cancelAnimationFrame = function() {};
+  context.devicePixelRatio = 1;
+  context.SAMPLE_SPRITES = [];
+  context.ResizeObserver = undefined;
+  context.location = { href: '' };
+  context.console = console;
+  context.structuredClone = structuredClone;
+  context.TextEncoder = TextEncoder;
+  context.performance = { now() { return 0; } };
+  context.URL = { createObjectURL() { return 'blob:fake'; }, revokeObjectURL() {} };
+  context.THREE = {
+    WebGLRenderer: FakeWebGLRenderer,
+    Scene: FakeScene,
+    PerspectiveCamera: FakePerspectiveCamera,
+    OrthographicCamera: FakeOrthographicCamera,
+    OrbitControls: FakeOrbitControls,
+    GridHelper: FakeGridHelper,
+    Group: FakeGroup,
+    Mesh: FakeMesh,
+    LineSegments: FakeLineSegments,
+    BufferGeometry: FakeBufferGeometry,
+    Float32BufferAttribute: FakeFloat32BufferAttribute,
+    MeshBasicMaterial: FakeMeshBasicMaterial,
+    LineBasicMaterial: FakeLineBasicMaterial,
+    Vector3: FakeVector3,
+    DoubleSide: 2,
+  };
+  vm.createContext(context);
+  const scripts = ['transfer.js', 'batch.js', 'worker-channel.js', 'profile-depth.js', 'viewport.js', 'voxel.js', 'voxio.js', 'zip.js', 'app.js'];
+  for (const file of scripts) loadScript(file, context);
+  return context;
+}
+
+function makeModelResult(marker) {
+  return {
+    grid: new Int16Array([0, 0]),
+    dims: [1, 1, 2],
+    voxels: 2,
+    palette: [[255, 0, 0]],
+    greedyFacesList: [{
+      normal: [0, 0, 1],
+      color: 0,
+      corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+      ao: [1, 1, 1, 1],
+    }],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+    marker,
   };
 }
 
@@ -82,6 +416,23 @@ function makePixels(w, h, fn) {
   return { w, h, data };
 }
 
+function occupiedZ(result, x, py) {
+  const out = [], y = result.dims[1] - 1 - py;
+  for (let z = 0; z < result.dims[2]; z++) if (result.grid[x + result.dims[0] * (y + result.dims[1] * z)] >= 0) out.push(z);
+  return out;
+}
+
+function connectedMaterialResults(Voxel) {
+  const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
+  const side = fixtures.clonePixels(fixtures.connectedMaterialSide);
+  const alphaConfig = Voxel.createDefaultConfig(); alphaConfig.depth.layers = 6; alphaConfig.material.enabled = false;
+  const materialConfig = Voxel.createDefaultConfig(); materialConfig.depth.layers = 6; materialConfig.material.tolerance = 45;
+  return {
+    alphaOnly: Voxel.voxelize(front, alphaConfig, { side }),
+    aware: Voxel.voxelize(front, materialConfig, { side }),
+  };
+}
+
 function baseOpts(extra) {
   return Object.assign({
     depth: 1,
@@ -117,6 +468,7 @@ function makeVoxelResult(marker) {
 
 test('alpha 0 no voxeliza pixeles totalmente transparentes', () => {
   const { Voxel } = loadRuntime();
+  assert.equal(Voxel.normalizeConfig({}).material.enabled, true);
   const pixels = makePixels(1, 1, () => [12, 34, 56, 0]);
   const result = Voxel.voxelize(pixels, baseOpts({ alpha: 0 }), {});
   assert.equal(result.voxels, 0);
@@ -141,6 +493,182 @@ test('el visual hull respeta la profundidad pedida en multivista', () => {
   assert.equal(shallow.voxels, 1);
   assert.equal(deep.dims[2], 6);
   assert.equal(deep.voxels, 6);
+});
+
+test('profundidad 64 conserva las 64 columnas del perfil sin limite legacy 32', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const side = makePixels(64, 1, () => [255, 255, 255, 255]);
+  const result = Voxel.voxelize(front, baseOpts({ depth: 64, materialAwareness: false }), { side });
+  assert.equal(Voxel.normalizeConfig({ depth: 64 }).depth.layers, 64);
+  assert.deepEqual(Array.from(result.dims), [1, 1, 64]);
+  assert.equal(result.voxels, 64);
+});
+
+test('profundidad maxima 256 acepta el grid exacto y rechaza un solo plano extra', () => {
+  const { Voxel } = loadRuntime();
+  assert.equal(Voxel.MAX_DEPTH_LAYERS, 256);
+  assert.equal(Voxel.MAX_VOXEL_COUNT, 256 ** 3);
+  assert.equal(Voxel.normalizeConfig({ depth: 999 }).depth.layers, 256);
+  const exact = makePixels(256, 256, (x, y) => x === 0 && y === 0 ? [255, 255, 255, 255] : [0, 0, 0, 0]);
+  const result = Voxel.voxelize(exact, baseOpts({ depth: 256, materialAwareness: false }), {});
+  assert.deepEqual(Array.from(result.dims), [256, 256, 256]);
+  assert.equal(result.voxels, 256);
+  const over = makePixels(257, 256, () => [0, 0, 0, 0]);
+  assert.throws(
+    () => Voxel.voxelize(over, baseOpts({ depth: 256, materialAwareness: false }), {}),
+    error => error.code === 'VOXEL_BUDGET_EXCEEDED'
+  );
+});
+
+test('Match profile usa el ancho de la frame lateral ya cortada del spritesheet', () => {
+  const ProfileDepth = loadProfileDepthRuntime();
+  const context = { window: {}, console, structuredClone, TextEncoder };
+  vm.createContext(context); loadScript('batch.js', context);
+  const sideSheet = makePixels(128, 64, (x, y) => [x, y, 0, 255]);
+  const selectedFrame = context.window.VoxelBatch.slicePixels(sideSheet, { c: 2, r: 1 }, 1);
+  const match = ProfileDepth.actionState({ views: [{ role: 'side', pixels: selectedFrame }] }, 256);
+  assert.equal(selectedFrame.w, 64);
+  assert.deepEqual({ enabled: match.enabled, depth: match.depth, sourceWidth: match.sourceWidth, clamped: match.clamped }, {
+    enabled: true, depth: 64, sourceWidth: 64, clamped: false,
+  });
+  const capped = ProfileDepth.actionState({ views: [{ role: 'side', pixels: makePixels(300, 1, () => [0, 0, 0, 255]) }] }, 256);
+  assert.deepEqual({ depth: capped.depth, clamped: capped.clamped }, { depth: 256, clamped: true });
+});
+
+test('Match profile queda deshabilitado sin vista lateral y no infiere desde frontal', () => {
+  const ProfileDepth = loadProfileDepthRuntime();
+  const match = ProfileDepth.actionState({ views: [{ role: 'top', pixels: makePixels(64, 64, () => [0, 0, 0, 0]) }] }, 256);
+  assert.equal(match.enabled, false);
+  assert.equal(match.depth, null);
+  assert.equal(match.status, ProfileDepth.STATUS.NO_SIDE_VIEW);
+});
+
+test('Match profile rechaza pixels laterales con bytes invalidos', () => {
+  const ProfileDepth = loadProfileDepthRuntime();
+  const badLength = { views: [{ role: 'side', pixels: { w: 4, h: 4, data: new Uint8Array(4) } }] };
+  const match = ProfileDepth.actionState(badLength, 256);
+  assert.equal(match.enabled, false);
+  assert.equal(match.depth, null);
+  assert.equal(match.sourceWidth, null);
+  assert.equal(match.clamped, false);
+  assert.equal(match.status, ProfileDepth.STATUS.INVALID_SIDE_PIXELS);
+  assert.equal(match.busy, false);
+  assert.equal(match.disabled, true);
+  const nonTyped = { views: [{ role: 'side', pixels: { w: 1, h: 1, data: [0, 0, 0, 255] } }] };
+  assert.equal(ProfileDepth.actionState(nonTyped, 256).status, ProfileDepth.STATUS.INVALID_SIDE_PIXELS);
+});
+
+test('Match profile se deshabilita durante preview o batch', () => {
+  const ProfileDepth = loadProfileDepthRuntime();
+  const side = makePixels(64, 64, () => [255, 255, 255, 255]);
+  const previewBusy = ProfileDepth.actionState({ views: [{ role: 'side', pixels: side }] }, 256, { previewBusy: true });
+  assert.equal(previewBusy.busy, true);
+  assert.equal(previewBusy.disabled, true);
+  const batchBusy = ProfileDepth.actionState({ views: [{ role: 'side', pixels: side }] }, 256, { batchBusy: true });
+  assert.equal(batchBusy.busy, true);
+  assert.equal(batchBusy.disabled, true);
+  const idle = ProfileDepth.actionState({ views: [{ role: 'side', pixels: side }] }, 256);
+  assert.equal(idle.busy, false);
+  assert.equal(idle.disabled, false);
+});
+
+test('diagnostico de perfil separa compresion de IoU sobre el grid', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const side = makePixels(64, 1, () => [255, 255, 255, 255]);
+  const compressed = Voxel.voxelize(front, baseOpts({ depth: 32, materialAwareness: false }), { side });
+  const view = compressed.diagnostics.views[0];
+  assert.equal(view.iou, 1, 'the resampled grid projection can remain exact');
+  assert.deepEqual(JSON.parse(JSON.stringify(view.profileResolution)), {
+    sourceWidth: 64,
+    gridDepth: 32,
+    compressionRatio: 0.5,
+    downsampled: true,
+    label: 'Profile 64 → 32 layers',
+  });
+  assert.ok(compressed.diagnostics.warnings.some(warning => warning.code === 'PROFILE_DOWNSAMPLED'));
+  const exact = Voxel.voxelize(front, baseOpts({ depth: 64, materialAwareness: false }), { side });
+  assert.equal(exact.diagnostics.views[0].profileResolution.downsampled, false);
+  assert.ok(!exact.diagnostics.warnings.some(warning => warning.code === 'PROFILE_DOWNSAMPLED'));
+});
+
+test('poses ortograficas respetan los ejes canonicos frontal perfil y cenital', () => {
+  const Viewport = loadViewportRuntime();
+  const right = pose => {
+    const direction = pose.target.map((value, index) => value - pose.position[index]);
+    return [
+      direction[1] * pose.up[2] - direction[2] * pose.up[1],
+      direction[2] * pose.up[0] - direction[0] * pose.up[2],
+      direction[0] * pose.up[1] - direction[1] * pose.up[0],
+    ].map(value => value === 0 ? 0 : Math.sign(value));
+  };
+  assert.deepEqual(Array.from(right(Viewport.orthographicPose('front', [64, 64, 64]))), [1, 0, 0]);
+  assert.deepEqual(Array.from(right(Viewport.orthographicPose('profile', [64, 64, 64]))), [0, 0, 1]);
+  assert.deepEqual(Array.from(right(Viewport.orthographicPose('top', [64, 64, 64]))), [1, 0, 0]);
+  assert.deepEqual(Array.from(Viewport.orthographicPose('top', [64, 64, 64]).up), [0, 0, -1]);
+});
+
+test('frustum ortografico encuadra el modelo segun modo y aspect ratio', () => {
+  const Viewport = loadViewportRuntime();
+  const front = Viewport.orthographicFrustum('front', [40, 20, 80], 2, 1);
+  const profile = Viewport.orthographicFrustum('profile', [40, 20, 80], 2, 1);
+  const top = Viewport.orthographicFrustum('top', [40, 20, 80], 2, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(front)), { left: -20, right: 20, top: 10, bottom: -10 });
+  assert.deepEqual(JSON.parse(JSON.stringify(profile)), { left: -40, right: 40, top: 20, bottom: -20 });
+  assert.deepEqual(JSON.parse(JSON.stringify(top)), { left: -80, right: 80, top: 40, bottom: -40 });
+});
+
+test('controlador recorre modos y restaura preferencia de rotacion en perspectiva', () => {
+  const { controller, perspectiveCamera, orthographicCamera, controls } = fakeCameraHarness();
+  assert.equal(controller.mode, 'perspective');
+  assert.equal(controller.activeCamera, perspectiveCamera);
+  assert.equal(controls.enableRotate, true);
+  assert.equal(controls.enablePan, true);
+  assert.equal(controls.autoRotate, true);
+
+  controller.setMode('front');
+  assert.equal(controller.mode, 'front');
+  assert.equal(controller.activeCamera, orthographicCamera);
+  assert.equal(controls.enableRotate, false);
+  assert.equal(controls.enablePan, false);
+  assert.equal(controls.autoRotate, false);
+
+  controller.setMode('profile');
+  assert.equal(controller.mode, 'profile');
+  assert.equal(controller.activeCamera, orthographicCamera);
+
+  controller.setMode('top');
+  assert.equal(controller.mode, 'top');
+  assert.equal(controller.activeCamera, orthographicCamera);
+
+  controller.setMode('perspective');
+  assert.equal(controller.mode, 'perspective');
+  assert.equal(controller.activeCamera, perspectiveCamera);
+  assert.equal(controls.autoRotate, true, 'auto-rotate preference must be restored');
+  assert.equal(controls.enableRotate, true);
+  assert.equal(controls.enablePan, true);
+});
+
+test('modelo 1x1x256 permanece dentro del frustum y clip en todo modo, reset, resize y cambio material', () => {
+  const dims = [1, 1, 256];
+  const { controller, perspectiveCamera, orthographicCamera, controls } = fakeCameraHarness(dims, 1);
+  for (const mode of ['perspective', 'front', 'profile', 'top']) {
+    controller.setMode(mode);
+    controller.reset();
+    const camera = mode === 'perspective' ? perspectiveCamera : orthographicCamera;
+    assertModelInsideClip(camera, controls, dims);
+    if (mode !== 'perspective') assertModelInsideOrthoFrustum(camera, dims, mode);
+
+    controller.resize(2);
+    assertModelInsideClip(camera, controls, dims);
+    if (mode !== 'perspective') assertModelInsideOrthoFrustum(camera, dims, mode);
+
+    const materialDims = [2, 2, 256];
+    controller.setDimensions(materialDims);
+    assertModelInsideClip(camera, controls, materialDims);
+    if (mode !== 'perspective') assertModelInsideOrthoFrustum(camera, materialDims, mode);
+  }
 });
 
 test('exportOBJ referencia el MTL solicitado sin AO', () => {
@@ -176,6 +704,29 @@ test('voxel.js expone Voxel en globalThis para compatibilidad con workers', () =
   assert.equal(typeof context.Voxel.voxelize, 'function');
 });
 
+test('fixtures de reconstruccion son payloads validos e independientes tras clonar', () => {
+  const { Voxel } = loadRuntime();
+  const pixelFixtures = {
+    frontL: fixtures.frontL,
+    sideFullDepth: fixtures.sideFullDepth,
+    topFullDepth: fixtures.topFullDepth,
+    depthMapGradient: fixtures.depthMapGradient,
+    disconnectedUnequal: fixtures.disconnectedUnequal,
+    connectedMaterialFront: fixtures.connectedMaterialFront,
+    connectedMaterialSide: fixtures.connectedMaterialSide,
+  };
+  for (const [name, original] of Object.entries(pixelFixtures)) {
+    const cloned = fixtures.clonePixels(original);
+    const validated = Voxel.validatePixels(cloned);
+    assert.equal(validated.w, original.w, name);
+    assert.equal(validated.h, original.h, name);
+    assert.equal(validated.data.length, original.w * original.h * 4, name);
+    assert.notEqual(validated.data, original.data, name);
+    cloned.data[0] = 99;
+    assert.notEqual(original.data[0], 99, name);
+  }
+});
+
 test('la config versionada por defecto conserva el grid legacy actual', () => {
   const { Voxel } = loadRuntime();
   const pixels = fixtures.clonePixels(fixtures.frontL);
@@ -203,7 +754,7 @@ test('normalizeConfig migra opciones legacy parciales sin perder defaults', () =
     alignment: { side: { offsetX: 8, rotation: 90, scale: 1.5 } },
     mesh: { ao: true, aoStrength: 0.35 },
   });
-  assert.equal(config.version, 2);
+  assert.equal(config.version, 3);
   assert.equal(config.silhouette.alphaThreshold, 18);
   assert.equal(config.silhouette.resampling, 'bilinear');
   assert.equal(config.palette.colors, 12);
@@ -256,7 +807,7 @@ test('worker conserva la configuracion normalizada en la respuesta', () => {
   });
   assert.equal(message.jobId, 'job-1');
   assert.equal(message.ok, true);
-  assert.equal(message.result.configVersion, 2);
+  assert.equal(message.result.configVersion, 3);
   assert.equal(message.result.config.silhouette.alphaThreshold, 12);
   assert.equal(message.result.config.silhouette.resampling, 'bilinear');
   assert.equal(message.result.config.depth.layers, 4);
@@ -267,6 +818,284 @@ test('worker conserva la configuracion normalizada en la respuesta', () => {
   assert.equal(message.result.config.reconstruction.topWeight, 1.7);
   assert.equal(message.result.config.mesh.ao, true);
   assert.equal(message.result.config.mesh.greedy, false);
+});
+
+test('material-aware confina el material adjunto a la profundidad compatible', () => {
+  const { Voxel } = loadRuntime();
+  const { alphaOnly, aware } = connectedMaterialResults(Voxel);
+  assert.deepEqual(occupiedZ(alphaOnly, 0, 1), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(occupiedZ(aware, 0, 1), [0]);
+  assert.equal(alphaOnly.voxels, 105);
+  assert.equal(aware.voxels, 66);
+});
+
+test('material-aware conserva el volumen del material estructural compatible', () => {
+  const { Voxel } = loadRuntime();
+  const { aware } = connectedMaterialResults(Voxel);
+  assert.deepEqual(occupiedZ(aware, 2, 1), [1, 2, 3, 4, 5]);
+  assert.deepEqual(occupiedZ(aware, 3, 1), [1, 2, 3, 4, 5]);
+  const structural = aware.diagnostics.material.clusters.find(cluster => cluster.supported);
+  assert.ok(structural.structuralVoxels > 0);
+});
+
+test('material-aware conserva detalles decorativos solo en la superficie frontal', () => {
+  const { Voxel } = loadRuntime();
+  const { aware } = connectedMaterialResults(Voxel);
+  const black = aware.palette.findIndex(color => color[0] < 12 && color[1] < 12 && color[2] < 12);
+  assert.ok(black >= 0);
+  assert.equal(Array.from(aware.grid).filter(index => index === black).length, 1);
+  assert.ok(aware.greedyFacesList.some(face => face.normal[2] === 1 && face.color === black));
+  assert.ok(aware.diagnostics.material.unmatchedFrontMaterials.some(item => item.surfaceOnly));
+  assert.equal(aware.diagnostics.material.decorativeFrontFaceArea, 1);
+});
+
+test('tolerancia perceptual agrupa variantes de sombreado sin usar igualdad RGB', () => {
+  const { Voxel } = loadRuntime();
+  const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
+  const side = fixtures.clonePixels(fixtures.connectedMaterialSide);
+  for (let i = 0; i < side.w * side.h; i++) {
+    if (side.data[i * 4] === 245) {
+      side.data[i * 4] = 220;
+      side.data[i * 4 + 1] = 165;
+      side.data[i * 4 + 2] = 20;
+    }
+  }
+  const tolerant = Voxel.createDefaultConfig(); tolerant.depth.layers = 6; tolerant.material.tolerance = 45;
+  const exactish = Voxel.createDefaultConfig(); exactish.depth.layers = 6; exactish.material.tolerance = 5;
+  const wide = Voxel.voxelize(front, tolerant, { side });
+  const narrow = Voxel.voxelize(front, exactish, { side });
+  const countAt = result => {
+    let count = 0, y = result.dims[1] - 2;
+    for (let z = 0; z < 6; z++) if (result.grid[result.dims[0] * (y + result.dims[1] * z)] >= 0) count++;
+    return count;
+  };
+  assert.equal(countAt(wide), 1);
+  assert.equal(countAt(narrow), 6);
+});
+
+test('material-aware degrada exactamente a alpha-only con metadata mask-only', () => {
+  const { Voxel } = loadRuntime();
+  const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
+  const maskOnly = fixtures.makePixels(6, 4, (z, y) => (z >= 1 || (z === 0 && y >= 1)) ? [0, 0, 0, 255] : [0, 0, 0, 0]);
+  const alpha = Voxel.createDefaultConfig(); alpha.depth.layers = 6; alpha.material.enabled = false;
+  const aware = Voxel.createDefaultConfig(); aware.depth.layers = 6;
+  const views = { views: [{ id: 'mask', role: 'side', pixels: maskOnly, materialEvidence: false }] };
+  const expected = Voxel.voxelize(front, alpha, views);
+  const actual = Voxel.voxelize(front, aware, views);
+  assert.deepEqual(Array.from(actual.grid), Array.from(expected.grid));
+  assert.equal(actual.diagnostics.material.reason, 'mask-only');
+  assert.ok(actual.diagnostics.warnings.some(warning => warning.code === 'MATERIAL_RGB_MISSING'));
+  assert.deepEqual(JSON.parse(JSON.stringify(actual.diagnostics.views[0].material)), {
+    eligible: false, evaluated: false, applied: false, compatible: 0, incompatible: 0, compatibility: null,
+  });
+});
+
+test('RGB negro puro es evidencia material valida sin sentinel implicito', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [0, 0, 0, 255]);
+  const side = makePixels(3, 1, () => [0, 0, 0, 255]);
+  const result = Voxel.voxelize(front, { depth: { layers: 3 } }, { side });
+  assert.equal(result.diagnostics.material.active, true);
+  assert.equal(result.diagnostics.material.reason, 'active');
+  assert.equal(result.diagnostics.views[0].material.evaluated, true);
+  assert.equal(result.diagnostics.views[0].material.compatibility, 1);
+});
+
+test('config v1 sin campos materiales preserva el grid alpha legacy', () => {
+  const { Voxel } = loadRuntime();
+  const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
+  const side = fixtures.clonePixels(fixtures.connectedMaterialSide);
+  const migrated = Voxel.normalizeConfig({ version: 1, depth: { layers: 6 } });
+  const alpha = Voxel.createDefaultConfig(); alpha.depth.layers = 6; alpha.depth.localWidthAware = false; alpha.material.enabled = false;
+  assert.equal(migrated.material.enabled, false);
+  assert.deepEqual(
+    Array.from(Voxel.voxelize(front, migrated, { side }).grid),
+    Array.from(Voxel.voxelize(front, alpha, { side }).grid)
+  );
+});
+
+test('configs v1 y v2 sin campos materiales reproducen exactamente el grid previo', () => {
+  const { Voxel } = loadRuntime();
+  const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
+  const side = fixtures.clonePixels(fixtures.connectedMaterialSide);
+  const alpha = Voxel.createDefaultConfig(); alpha.depth.layers = 6; alpha.depth.localWidthAware = false; alpha.material.enabled = false;
+  const expected = Array.from(Voxel.voxelize(front, alpha, { side }).grid);
+  for (const version of [1, 2]) {
+    const migrated = Voxel.normalizeConfig({ version, depth: { layers: 6 } });
+    assert.equal(migrated.material.enabled, false);
+    assert.deepEqual(Array.from(Voxel.voxelize(front, migrated, { side }).grid), expected, `v${version}`);
+    const unknownOnly = Voxel.normalizeConfig({ version, depth: { layers: 6 }, material: { pluginMetadata: 'ignored' } });
+    assert.equal(unknownOnly.material.enabled, false, `unknown-only v${version}`);
+    assert.deepEqual(Array.from(Voxel.voxelize(front, unknownOnly, { side }).grid), expected, `unknown-only v${version}`);
+  }
+});
+
+test('diagnosticos distinguen ausencia, desactivado, fuerza cero, mask-only y activo', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [180, 30, 40, 255]);
+  const side = makePixels(2, 1, () => [180, 30, 40, 255]);
+  const absent = Voxel.voxelize(front, { depth: { layers: 2 } }, {});
+  assert.equal(absent.diagnostics.material.reason, 'no-auxiliary-views');
+  assert.equal(absent.diagnostics.material.requested, true);
+  assert.equal(absent.diagnostics.material.active, false);
+  assert.equal(absent.diagnostics.warnings.some(warning => warning.stage === 'material'), false);
+  const disabled = Voxel.voxelize(front, { depth: { layers: 2 }, material: { enabled: false } }, { side });
+  assert.equal(disabled.diagnostics.material.reason, 'disabled');
+  assert.equal(disabled.diagnostics.material.requested, false);
+  assert.equal(disabled.diagnostics.material.effective, false);
+  const zero = Voxel.voxelize(front, { depth: { layers: 2 }, material: { strength: 0 } }, { side });
+  assert.equal(zero.diagnostics.material.reason, 'zero-strength');
+  assert.equal(zero.diagnostics.material.requested, true);
+  assert.equal(zero.diagnostics.material.effective, false);
+  const mask = Voxel.voxelize(front, { depth: { layers: 2 } }, { views: [{ role: 'side', pixels: side, materialEvidence: false }] });
+  assert.equal(mask.diagnostics.material.reason, 'mask-only');
+  const active = Voxel.voxelize(front, { depth: { layers: 2 } }, { side });
+  assert.equal(active.diagnostics.material.reason, 'active');
+  assert.equal(active.diagnostics.material.active, true);
+});
+
+test('una vista sin pixels compatibles aporta incompatibilidad en strict y weighted', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [220, 20, 20, 255]);
+  const side = makePixels(3, 1, () => [220, 20, 20, 255]);
+  const top = makePixels(1, 3, () => [20, 40, 220, 255]);
+  for (const mode of ['strict', 'weighted']) {
+    const config = Voxel.createDefaultConfig();
+    config.depth.layers = 3; config.reconstruction.mode = mode; config.reconstruction.threshold = 1; config.material.strength = 0.6;
+    const result = Voxel.voxelize(front, config, { side, top });
+    assert.equal(result.voxels, 0, mode);
+    const topDiagnostic = result.diagnostics.views.find(view => view.role === 'top').material;
+    assert.equal(topDiagnostic.evaluated, true);
+    assert.equal(topDiagnostic.compatibility, 0);
+    assert.ok(topDiagnostic.incompatible > 0);
+  }
+});
+
+test('detalle frontal no colorea caras +Z internas de cavidades desconectadas', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(2, 1, x => x === 0 ? [150, 35, 170, 255] : [0, 0, 0, 255]);
+  const side = makePixels(3, 1, z => z === 1 ? [0, 0, 0, 0] : [150, 35, 170, 255]);
+  const result = Voxel.voxelize(front, { depth: { layers: 3 }, material: { tolerance: 30 } }, { side });
+  const black = result.palette.findIndex(color => color.every(value => value < 12));
+  const y = 0;
+  assert.ok(black >= 0);
+  const faces = JSON.parse(JSON.stringify(result.greedyFacesList));
+  const internal = faces.find(face => face.normal[2] === 1 && face.corners.every(point => point[2] === 1)
+    && Math.min(...face.corners.map(point => point[0])) <= 1 && Math.max(...face.corners.map(point => point[0])) >= 2);
+  assert.ok(internal);
+  assert.notEqual(internal.color, black);
+  assert.ok(faces.some(face => face.normal[2] === 1 && face.color === black && face.corners.every(point => point[2] === 3)));
+  assert.deepEqual(occupiedZ(result, 1, y), [0, 2]);
+});
+
+test('weighted incorpora compatibilidad material, diagnosticos, overlays y memoria acotada', () => {
+  const { Voxel } = loadRuntime();
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 6;
+  config.reconstruction.mode = 'weighted';
+  config.reconstruction.threshold = 1;
+  config.material.tolerance = 45;
+  const result = Voxel.voxelize(fixtures.clonePixels(fixtures.connectedMaterialFront), config, {
+    side: fixtures.clonePixels(fixtures.connectedMaterialSide),
+  });
+  const view = result.diagnostics.views[0];
+  assert.equal(result.diagnostics.material.active, true);
+  assert.ok(view.materialCoverage > 0);
+  assert.ok(view.materialCandidateCompatibility > 0 && view.materialCandidateCompatibility < 1);
+  assert.equal(view.materialOverlay.length, 24);
+  assert.ok(Array.from(view.materialOverlay).some(value => value === 3));
+  assert.ok(result.metrics.materialEvidenceBytes > 0);
+  assert.ok(result.metrics.materialEvidenceBytes <= 8 * 1024 * 1024);
+  assert.equal(result.metrics.materialEvidenceBytes, result.diagnostics.material.memoryBytes);
+  assert.ok(result.metrics.materialCompareWork > 0 && result.metrics.materialCompareWork <= 64 * 1024 * 1024);
+  assert.ok(result.metrics.memoryEstimateBytes >= result.metrics.materialEvidenceBytes);
+  assert.equal(result.config.material.enabled, true);
+  assert.equal(result.legacyOptions.materialAwareness, true);
+  assert.ok(result.diagnostics.warnings.some(warning => warning.code === 'MATERIAL_MISMATCH_GHOST_RISK'));
+  assert.equal(result.diagnostics.warnings.filter(warning => warning.code === 'MATERIAL_MISMATCH_GHOST_RISK').length, 1);
+});
+
+test('worker serializa configuracion y diagnosticos material-aware completos', () => {
+  const worker = loadWorkerRuntime();
+  const message = worker.dispatch({
+    jobId: 'material-job',
+    pixels: fixtures.clonePixels(fixtures.connectedMaterialFront),
+    opts: { depth: 6, materialAwareness: true, materialTolerance: 45, materialStrength: 0.7 },
+    views: { side: fixtures.clonePixels(fixtures.connectedMaterialSide) },
+  });
+  assert.equal(message.ok, true);
+  assert.equal(message.result.config.material.tolerance, 45);
+  assert.equal(message.result.config.material.strength, 0.7);
+  assert.equal(message.result.diagnostics.material.active, true);
+  assert.ok(ArrayBuffer.isView(message.result.diagnostics.views[0].materialOverlay));
+  assert.ok(message.result.diagnostics.warnings.some(warning => warning.code === 'SURFACE_ONLY_DETAILS'));
+  const transferList = worker.takeTransferList();
+  assert.ok(Array.isArray(transferList) && transferList.length > 0);
+  assert.equal(new Set(transferList).size, transferList.length, 'transfer buffers must be deduplicated');
+  assert.ok(transferList.includes(message.result.grid.buffer));
+  assert.ok(transferList.includes(message.result.diagnostics.views[0].materialOverlay.buffer));
+  assert.ok(transferList.every(buffer => Number.isInteger(buffer.byteLength)));
+});
+
+test('presupuesto de comparacion material degrada a alpha-only antes del trabajo cuadratico', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 10000, (x, y) => y === 0 ? [150, 35, 170, 255] : [0, 0, 0, 0]);
+  const side = makePixels(64, 10000, () => [150, 35, 170, 255]);
+  const alpha = Voxel.createDefaultConfig(); alpha.depth.layers = 64; alpha.material.enabled = false;
+  const aware = Voxel.createDefaultConfig(); aware.depth.layers = 64;
+  const expected = Voxel.voxelize(front, alpha, { side });
+  const actual = Voxel.voxelize(front, aware, { side });
+  assert.deepEqual(Array.from(actual.grid), Array.from(expected.grid));
+  assert.equal(actual.diagnostics.material.reason, 'material-compare-budget');
+  assert.ok(actual.diagnostics.warnings.some(warning => warning.code === 'MATERIAL_COMPARE_BUDGET'));
+  assert.ok(actual.metrics.materialCompareWork <= 64 * 1024 * 1024);
+});
+
+test('ruta publica normalizada limita bytes transformados con profundidad legal', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(4096, 64, () => [0, 0, 0, 0]);
+  const largeTop = makePixels(4096, 96, () => [255, 0, 0, 255]);
+  assert.throws(
+    () => Voxel.voxelize(front, { depth: { layers: 64 } }, { views: Array.from({ length: 8 }, (_, index) => ({
+      id: `top-${index}`, role: 'top', pixels: largeTop,
+    })) }),
+    error => error.code === 'TRANSFORMED_VIEW_BUDGET_EXCEEDED'
+  );
+});
+
+test('presupuesto incluye lookups de ocupacion y degrada antes de reconstruir', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(512, 256, () => [150, 35, 170, 255]);
+  const side = makePixels(64, 256, (z) => z === 0 ? [150, 35, 170, 255] : [0, 0, 0, 0]);
+  const top = makePixels(512, 64, (x, z) => x === 0 && z === 0 ? [150, 35, 170, 255] : [0, 0, 0, 0]);
+  const views = { views: [
+    ...Array.from({ length: 4 }, (_, index) => ({ id: `side-${index}`, role: 'side', pixels: side })),
+    ...Array.from({ length: 4 }, (_, index) => ({ id: `top-${index}`, role: 'top', pixels: top })),
+  ] };
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 64;
+  const result = Voxel.voxelize(front, config, views);
+  assert.equal(result.diagnostics.material.reason, 'material-occupancy-budget');
+  assert.equal(result.diagnostics.material.active, false);
+  assert.equal(result.metrics.materialOccupancyCompareWork, 0);
+  assert.ok(result.metrics.materialOccupancyCompareWorkEstimate + result.metrics.materialPrepareCompareWork > 64 * 1024 * 1024);
+  assert.ok(result.diagnostics.warnings.some(warning => warning.code === 'MATERIAL_OCCUPANCY_BUDGET'));
+});
+
+test('contabilidad material cerca de 8 MiB incluye arrays fijos, rangos y overlays', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(4096, 63, () => [150, 35, 170, 255]);
+  const top = makePixels(4096, 64, (x) => x === 0 ? [150, 35, 170, 255] : [0, 0, 0, 0]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 64;
+  const result = Voxel.voxelize(front, config, { views: Array.from({ length: 4 }, (_, index) => ({
+    id: `near-cap-${index}`, role: 'top', pixels: top,
+  })) });
+  assert.equal(result.metrics.materialEvidenceBytes, 8149203);
+  assert.ok(result.metrics.materialEvidenceBytes > 7.75 * 1024 * 1024, result.metrics.materialEvidenceBytes);
+  assert.ok(result.metrics.materialEvidenceBytes <= 8 * 1024 * 1024);
+  assert.equal(result.metrics.materialEvidenceBytes, result.diagnostics.material.memoryBytes);
+  assert.equal(result.diagnostics.material.reason, 'active');
+  assert.ok(result.diagnostics.material.clusters[0].acceptedZSpan);
+  assert.ok(result.diagnostics.views.every(view => view.materialOverlay && view.materialOverlay.length === 4096 * 64));
 });
 
 test('la alineacion multivista respeta el espejo horizontal esperado', () => {
@@ -544,16 +1373,30 @@ test('config no anuncia malla smooth no implementada', () => {
   assert.equal(Object.prototype.hasOwnProperty.call(config.mesh, 'isoLevel'), false);
 });
 
-test('CONFIG_VERSION 2 migra v1 y round-trip de campos nuevos no deriva', () => {
+test('CONFIG_VERSION 3 migra v1/v2 y round-trip de campos nuevos no deriva', () => {
   const { Voxel } = loadRuntime();
   const v1 = Voxel.normalizeConfig({ version: 1, depth: { profile: 'dt' }, color: { darken: 0.41 } });
-  assert.equal(v1.version, 2);
+  assert.equal(v1.version, 3);
   assert.equal(v1.depth.localWidthAware, false);
+  assert.equal(v1.material.enabled, false);
+  const v2 = Voxel.normalizeConfig({ version: 2, depth: { layers: 6 }, reconstruction: { mode: 'strict' } });
+  assert.equal(v2.version, 3);
+  assert.equal(v2.material.enabled, false);
+  const explicitV1 = Voxel.normalizeConfig({ version: 1, material: { enabled: true, tolerance: 31, strength: 0.4 } });
+  const explicitV2 = Voxel.normalizeConfig({ version: 2, material: { enabled: true, tolerance: 29, strength: 0.3 } });
+  const partialV2 = Voxel.normalizeConfig({ version: 2, material: { tolerance: 27, strength: 0.2 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(explicitV1.material)), { enabled: true, tolerance: 31, strength: 0.4 });
+  assert.deepEqual(JSON.parse(JSON.stringify(explicitV2.material)), { enabled: true, tolerance: 29, strength: 0.3 });
+  assert.deepEqual(JSON.parse(JSON.stringify(partialV2.material)), { enabled: true, tolerance: 27, strength: 0.2 });
+  assert.equal(Voxel.normalizeConfig({ material: { tolerance: 999 } }).material.tolerance, 128);
   const legacy = Voxel.legacyOptionsFromConfig(Voxel.normalizeConfig({
-    depth: { localWidthAware: true }, color: { mode: 'auxiliary', side: 'darken', back: 'darken', darken: 0.41 },
+    depth: { localWidthAware: true }, material: { enabled: true, tolerance: 37, strength: 0.72 }, color: { mode: 'auxiliary', side: 'darken', back: 'darken', darken: 0.41 },
   }));
   const roundTrip = Voxel.normalizeConfig(legacy);
   assert.equal(roundTrip.depth.localWidthAware, true);
+  assert.equal(roundTrip.material.enabled, true);
+  assert.equal(roundTrip.material.tolerance, 37);
+  assert.equal(roundTrip.material.strength, 0.72);
   assert.equal(roundTrip.color.mode, 'auxiliary');
   assert.equal(roundTrip.color.side, 'darken');
   assert.equal(roundTrip.color.back, 'darken');
@@ -680,6 +1523,23 @@ test('VOX rechaza mas de 255 colores usados en lugar de corromper RGBA', () => {
   const { VoxIO } = loadRuntime();
   const palette = Array.from({ length: 256 }, (_, i) => [i, (i * 17) & 255, (i * 31) & 255]);
   assert.throws(() => VoxIO.exportVox({ grid: Int16Array.from({ length: 256 }, (_, i) => i), dims: [256, 1, 1], palette }), /at most 255/);
+});
+
+test('VOX total bytes igual a 1096 mas cuatro por voxel ocupado', () => {
+  const { VoxIO } = loadRuntime();
+  const palette = [[255, 0, 0], [0, 255, 0]];
+  const grid = new Int16Array([-1, 0, 1, -1]);
+  const bytes = VoxIO.exportVox({ grid, dims: [2, 2, 1], palette });
+  assert.equal(bytes.length, VoxIO.VOX_FIXED_BYTES + 2 * 4);
+  assert.equal(bytes.length, 1096 + 2 * 4);
+});
+
+test('VOX rechaza exportacion que excede el presupuesto de bytes antes de asignar', () => {
+  const { VoxIO } = loadRuntime();
+  const dims = [256, 256, 64];
+  const grid = new Int16Array(dims[0] * dims[1] * dims[2]).fill(0);
+  const palette = [[255, 0, 0]];
+  assert.throws(() => VoxIO.exportVox({ grid, dims, palette }), error => error.code === 'VOX_EXPORT_BUDGET_EXCEEDED');
 });
 
 test('transfer helper deduplica buffers compartidos y clona payloads', () => {
@@ -834,6 +1694,58 @@ test('colores auxiliares son especificos por cara y VOX declara fusion voxel los
   assert.deepEqual(Array.from(vox.slice(rgbaOffset + 12, rgbaOffset + 20)), [26, 102, 102, 255, 51, 102, 102, 255]);
 });
 
+test('app invalida malla, estadisticas, diagnosticos y export ante fallo de reconstruccion', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  assert.ok(dbg, 'app.js must expose a debug seam');
+  const result = makeModelResult('stale');
+  dbg.buildModel(result);
+  assert.ok(dbg.mesh, 'mesh must exist after successful build');
+  assert.equal(dbg.modelGroup.children.length, 2, 'mesh and wireframe must be in the scene group');
+  dbg.invalidatePreviewEvidence('Error de reconstruccion');
+  assert.equal(dbg.mesh, null, 'mesh must be cleared after failure');
+  assert.equal(dbg.wire, null, 'wireframe must be cleared after failure');
+  assert.equal(dbg.state.last, null, 'last result must be cleared after failure');
+  assert.equal(Object.keys(dbg.state.diagnosticViewIds).length, 0, 'diagnostic view ids must be cleared after failure');
+  const stVox = win.document.getElementById('stVox');
+  const stRaw = win.document.getElementById('stRaw');
+  const stGreedy = win.document.getElementById('stGreedy');
+  const stRed = win.document.getElementById('stRed');
+  const statDims = win.document.getElementById('statDims');
+  const swatches = win.document.getElementById('swatches');
+  const diagnostics = win.document.getElementById('diagnostics');
+  assert.equal(stVox.textContent, '—');
+  assert.equal(stRaw.textContent, '—');
+  assert.equal(stGreedy.textContent, '—');
+  assert.equal(stRed.textContent, '—');
+  assert.equal(statDims.textContent, '— grid');
+  assert.equal(swatches.children.length, 0);
+  assert.equal(diagnostics.children.length, 0);
+  dbg.refreshActionState();
+  assert.equal(win.document.getElementById('exportBtn').disabled, true, 'export must be disabled after failure');
+});
+
+test('app reemplaza modelo obsoleto sin perder el material en reconstrucciones exitosas', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const first = makeModelResult('first');
+  const second = makeModelResult('second');
+  second.palette = [[0, 255, 0]];
+  dbg.buildModel(first);
+  const firstMesh = dbg.mesh;
+  assert.ok(firstMesh);
+  dbg.buildModel(second);
+  const secondMesh = dbg.mesh;
+  assert.ok(secondMesh);
+  assert.notEqual(firstMesh, secondMesh, 'a new mesh instance must replace the stale one');
+  assert.equal(dbg.modelGroup.children.length, 2, 'only one mesh and one wireframe remain');
+  assert.equal(dbg.modelGroup.children.filter(o => o.kind === 'mesh').length, 1, 'exactly one mesh remains');
+  dbg.state.last = second;
+  assert.equal(dbg.state.last.marker, 'second', 'last result must reflect the new valid result');
+  dbg.refreshActionState();
+  assert.equal(win.document.getElementById('exportBtn').disabled, false, 'export must be enabled after success');
+});
+
 test('worker channel conserva snapshot canonico, degrada replies nulas e ignora errores tardios', async () => {
   const context = { window: {}, console, structuredClone, setTimeout, clearTimeout };
   vm.createContext(context); loadScript('transfer.js', context); loadScript('worker-channel.js', context);
@@ -900,6 +1812,97 @@ test('worker protocol settlea toda la encarnacion ante ids, envelopes o dispatch
   const dispatchB = dispatch.channel.run(makePixels(1, 1, () => [6, 0, 0, 255]), {}, {});
   assert.deepEqual([(await dispatchA).marker, (await dispatchB).marker], [5, 6]);
   assert.equal(dispatch.channel.status().pending, 0);
+});
+
+test('worker fallback rechaza trabajo oversized con WORKER_FALLBACK_WORK_EXCEEDED sin bloquear', async () => {
+  const context = { window: {}, console, structuredClone, setTimeout, clearTimeout };
+  vm.createContext(context); loadScript('transfer.js', context); loadScript('worker-channel.js', context);
+  const channel = context.window.VoxelWorkerChannel.create({
+    WorkerCtor: null,
+    voxelize: () => makeVoxelResult(),
+    transfer: context.window.VoxelTransfer,
+    maxSynchronousWork: 1,
+  });
+  const promise = channel.run(makePixels(2, 2, () => [255, 0, 0, 255]), { depth: { layers: 2 } }, {});
+  await assert.rejects(promise, error => error.code === 'WORKER_FALLBACK_WORK_EXCEEDED');
+  assert.equal(channel.status().pending, 0, 'oversized fallback must not leave pending jobs');
+});
+
+test('worker settlea todos los pending ante fallo de constructor', async () => {
+  const context = { window: {}, console, structuredClone, setTimeout, clearTimeout };
+  vm.createContext(context); loadScript('transfer.js', context); loadScript('worker-channel.js', context);
+  class FailingConstructorWorker {
+    constructor() { throw new Error('constructor failure'); }
+  }
+  const calls = [];
+  const voxelize = pixels => { calls.push(pixels.data[0]); return makeVoxelResult(pixels.data[0]); };
+  const channel = context.window.VoxelWorkerChannel.create({
+    WorkerCtor: FailingConstructorWorker,
+    voxelize,
+    transfer: context.window.VoxelTransfer,
+    maxSynchronousWork: 10,
+  });
+  const a = channel.run(makePixels(1, 1, () => [1, 0, 0, 255]), {}, {});
+  const b = channel.run(makePixels(1, 1, () => [2, 0, 0, 255]), {}, {});
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(ra.marker, 1);
+  assert.equal(rb.marker, 2);
+  assert.deepEqual(calls, [1, 2]);
+  assert.equal(channel.status().pending, 0);
+});
+
+test('worker settlea todos los pending ante fallo de runtime', async () => {
+  const context = { window: {}, console, structuredClone, setTimeout, clearTimeout };
+  vm.createContext(context); loadScript('transfer.js', context); loadScript('worker-channel.js', context);
+  const instances = [];
+  class RuntimeFailureWorker {
+    constructor() { instances.push(this); }
+    postMessage(payload) { this.payload = payload; }
+    terminate() { this.terminated = true; }
+  }
+  const calls = [];
+  const voxelize = pixels => { calls.push(pixels.data[0]); return makeVoxelResult(pixels.data[0]); };
+  const channel = context.window.VoxelWorkerChannel.create({
+    WorkerCtor: RuntimeFailureWorker,
+    voxelize,
+    transfer: context.window.VoxelTransfer,
+    backoffBaseMs: 0,
+    maxSynchronousWork: 10,
+  });
+  const a = channel.run(makePixels(1, 1, () => [1, 0, 0, 255]), {}, {});
+  const b = channel.run(makePixels(1, 1, () => [2, 0, 0, 255]), {}, {});
+  instances[0].onerror({ message: 'runtime failure' });
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(ra.marker, 1);
+  assert.equal(rb.marker, 2);
+  assert.deepEqual(calls, [1, 2]);
+  assert.equal(channel.status().pending, 0);
+});
+
+test('worker no settlea pending duplicados ante fallo de encarnacion', async () => {
+  const context = { window: {}, console, structuredClone, setTimeout, clearTimeout };
+  vm.createContext(context); loadScript('transfer.js', context); loadScript('worker-channel.js', context);
+  const instances = [];
+  let resolves = 0;
+  class PassiveWorker {
+    constructor() { instances.push(this); }
+    postMessage(payload) { this.payload = payload; }
+    terminate() { this.terminated = true; }
+  }
+  const voxelize = () => { resolves++; return makeVoxelResult(); };
+  const channel = context.window.VoxelWorkerChannel.create({
+    WorkerCtor: PassiveWorker,
+    voxelize,
+    transfer: context.window.VoxelTransfer,
+    backoffBaseMs: 0,
+    maxSynchronousWork: 10,
+  });
+  const a = channel.run(makePixels(1, 1, () => [1, 0, 0, 255]), {}, {});
+  const b = channel.run(makePixels(1, 1, () => [2, 0, 0, 255]), {}, {});
+  instances[0].onerror({ message: 'runtime failure' });
+  await Promise.all([a, b]);
+  assert.equal(resolves, 2, 'each pending job must settle exactly once');
+  assert.equal(channel.status().pending, 0);
 });
 
 test('manifest batch snapshottea una vez, genera lazy, limita memoria y nombres duplicados', () => {
