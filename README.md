@@ -6,7 +6,7 @@
 
 An advanced, robust, and predictable tool for converting 2D pixel art into high-quality 3D voxel models, designed for artists and game developers.
 
-![Voxelizer UI](images/voxelizer-ui.png)
+![Voxelizer UI](https://github.com/NicoRuedaA/Voxelizer/blob/main/assets/image.webp)
 
 ## ✨ What is Voxelizer?
 
