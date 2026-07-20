@@ -1,0 +1,115 @@
+```yaml
+schema: gentle-ai.verify-result/v1
+evidence_revision: sha256:7ad2fb198cbc410b6c5be0e9d90d1eb6e4f7da2b75e2be624f80094660f9ba89
+verdict: fail
+blockers: 1
+critical_findings: 1
+requirements: 7/7
+scenarios: 11/12
+test_command: node --test --test-reporter=spec tests/voxelizer.test.js
+test_exit_code: 0
+test_output_hash: sha256:6934ce27f4010df6b91ca4ca7d7a0b1dd6fa0ad00740562846962b116ecc172f
+build_command: node --check voxelizer/voxel.js && node --check voxelizer/app.js && node --check voxelizer/batch.js
+build_exit_code: 0
+build_output_hash: sha256:194ff5bca66278888f0f00be5c7ca523d15098ece958b14952533811089f6106
+```
+
+## Verification Report
+
+**Change**: symmetry-inference
+**Version**: N/A
+**Mode**: Standard
+
+### Completeness
+
+| Metric | Value |
+|--------|-------|
+| Tasks total | 27 |
+| Tasks complete | 27 |
+| Tasks incomplete | 0 |
+
+### Build & Tests Execution
+
+**Build / Syntax check**: ✅ Passed
+```text
+$ node --check voxelizer/voxel.js && node --check voxelizer/app.js && node --check voxelizer/batch.js
+(no output)
+EXIT:0
+```
+
+**Tests**: ✅ 125 passed / ❌ 0 failed / ⚠️ 0 skipped
+```text
+$ node --test --test-reporter=spec tests/voxelizer.test.js
+...
+ℹ tests 125
+ℹ suites 0
+ℹ pass 125
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9984.306086
+```
+
+**Coverage**: Not available (no coverage harness configured)
+
+### Spec Compliance Matrix
+
+| Requirement | Scenario | Test | Result |
+|-------------|----------|------|--------|
+| Opt-in inference flags | Enabled | `inferencia provee una vista back cuando solo hay frontal y esta habilitada` | ✅ COMPLIANT |
+| Opt-in inference flags | Back flag off | (none found) | ❌ UNTESTED |
+| Opt-in inference flags | Disabled | `inferencia deshabilitada conserva el comportamiento previo` | ✅ COMPLIANT |
+| Pure inference helper | Mirror | `inferViews espeja filas horizontalmente y conserva alpha` | ✅ COMPLIANT |
+| Pure inference helper | Alpha | `inferViews espeja filas horizontalmente y conserva alpha` | ✅ COMPLIANT |
+| Real views take precedence | Real back wins | `inferencia no reemplaza una vista back real` | ✅ COMPLIANT |
+| Real views take precedence | Fills missing role | `inferencia provee una vista back cuando solo hay frontal y esta habilitada` | ✅ COMPLIANT |
+| Pixel budget validation | Within budget | `inferencia activada produce silueta y colores traseros desde solo frontal` | ✅ COMPLIANT |
+| Pixel budget validation | Exceeds budget | `vista inferida que excede presupuesto de pixeles auxiliares lanza error de presupuesto` | ✅ COMPLIANT |
+| UI toggle | Toggle on | `toggle de inferencia actualiza state.opts.inferenceEnabled` | ✅ COMPLIANT |
+| Batch support | Single front batch record | `batch manifest incluye vista back inferida sin registros extras` | ✅ COMPLIANT |
+| Color mode documentation | Auxiliary mode | `inferencia activada produce silueta y colores traseros desde solo frontal` | ✅ COMPLIANT |
+
+**Compliance summary**: 11/12 scenarios compliant
+
+### Correctness (Static Evidence)
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| `DEFAULT_CONFIG.inference` defaults | ✅ Implemented | `enabled: false`, `back: true` in `voxelizer/voxel.js` |
+| Legacy option `inferenceEnabled` | ✅ Implemented | Patched in `_legacyPatch` and returned by `legacyOptionsFromConfig` |
+| `normalizeConfig` inference merge | ✅ Implemented | Coerces `enabled` and `back` booleans |
+| `inferViews(frontPixels, config)` | ✅ Implemented | Pure horizontal mirror, preserves alpha, returns `null` when disabled |
+| Merge into `voxelize` | ✅ Implemented | `_mergeInferredViews` called after `preprocessPixels`, before `normalizeViewInputs` |
+| Real view precedence | ✅ Implemented | `_hasRealBack` skips inference when a `back` view is in `views.views` |
+| UI toggle wiring | ✅ Implemented | `inferenceEnabled` toggle in `index.html`, bound in `app.js` |
+| Batch inference | ✅ Implemented | Local `_mirrorBack` in `batch.js`, guarded by `opts.inferenceEnabled` |
+| Pixel budget validation | ✅ Implemented | Inferred view flows through `_assertAuxiliaryBudgets` |
+| Auxiliary color documentation | ✅ Implemented | Hint in `index.html` describes mirrored back colors |
+
+### Coherence (Design)
+
+| Decision | Followed? | Notes |
+|----------|-----------|-------|
+| Inject inferred view in `voxelize`, not `normalizeViewInputs` | ✅ Yes | `_mergeInferredViews` is a private step inside `voxelize` |
+| Source pixels for mirroring: `preprocessPixels` output | ✅ Yes | `frontPixels` passed to `inferViews` is the preprocessed payload |
+| Batch inference: local `_mirrorBack` in `batch.js` | ✅ Yes | Self-contained, no dependency on `Voxel.inferViews` |
+| UI config: legacy flat `inferenceEnabled` option | ✅ Yes | `state.opts.inferenceEnabled` round-trips through config normalization |
+| Expose only `enabled` in UI | ✅ Yes | `back` remains hidden and defaults to `true` |
+
+### Issues Found
+
+**CRITICAL**:
+- `Opt-in inference flags / Back flag off` scenario is **UNTESTED**. No test exercises `config.inference.enabled = true` with `config.inference.back = false` to verify that no back view is inferred. Per the spec, a scenario is compliant only when a covering test passes at runtime.
+
+**WARNING**:
+- `_hasRealBack` only inspects `views.views` and ignores a top-level `views.back` property. If a caller passes a real back via the legacy `views.back` field, the inferred back would still be injected and `normalizeViewInputs` would create two `back` entries. The current app and batch paths use `views.views`, so this is a latent edge case, not an active regression.
+
+**SUGGESTION**:
+- Add the missing `Back flag off` regression test to reach full 12/12 scenario coverage.
+- Consider making `_hasRealBack` also check `views.back` so the precedence rule is robust for all supported input shapes.
+- The proposal success criteria checkboxes remain unchecked; they can be ticked once the final verification gaps are closed.
+
+### Verdict
+
+**FAIL** — one spec scenario (`Back flag off`) lacks a passing covering test, which violates the requirement that inferred views are produced only when both `inference.enabled` and `inference.back` are true.

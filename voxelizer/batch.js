@@ -15,6 +15,12 @@
     const value = String(name || 'item').replace(/\\/g, '/').split('/').pop().replace(/\.[a-z0-9]+$/i, '') || 'item';
     return value.replace(/[\x00-\x1f<>:"/\\|?*]+/g, '_');
   }
+  function modelBaseName(name) {
+    return baseName(name).replace(/-(front|back|left|right|top)$/, '');
+  }
+  function viewRole(kind) {
+    return kind === 'depthMap' ? 'depthmap' : kind;
+  }
   function allocateBaseNames(names) {
     const used = new Set();
     return names.map(name => {
@@ -34,6 +40,21 @@
     if (Array.isArray(value)) return value.map(cloneValue);
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneValue(item)]));
     return value;
+  }
+  function _mirrorBack(source) {
+    const { w, h, data } = source;
+    const mirrored = new data.constructor(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const src = (w - 1 - x + w * y) * 4;
+        const dst = (x + w * y) * 4;
+        mirrored[dst] = data[src];
+        mirrored[dst + 1] = data[src + 1];
+        mirrored[dst + 2] = data[src + 2];
+        mirrored[dst + 3] = data[src + 3];
+      }
+    }
+    return { w, h, data: mirrored };
   }
   function slicePixels(source, sheet, frame) {
     const cols = Math.max(1, sheet.c | 0), rows = Math.max(1, sheet.r | 0);
@@ -55,9 +76,18 @@
     const alignmentFor = adapters.alignmentFor || (() => ({}));
     const records = [...sourceItems];
     const frames = frameCount(sheet);
-    const totalJobs = records.length * frames;
+    const siblingMap = new Map();
+    for (const record of records) {
+      const role = record.role || 'front';
+      if (role === 'front') continue;
+      const base = modelBaseName(record.name);
+      if (!siblingMap.has(base)) siblingMap.set(base, []);
+      siblingMap.get(base).push({ record, role });
+    }
+    const frontRecords = records.filter(record => (record.role || 'front') === 'front');
+    const totalJobs = frontRecords.length * frames;
     if (totalJobs > MAX_BATCH_JOBS) throw budgetError('BATCH_JOB_BUDGET_EXCEEDED', `Batch has ${totalJobs} jobs; maximum is ${MAX_BATCH_JOBS}`);
-    const bases = allocateBaseNames(records.map(record => record.name));
+    const bases = allocateBaseNames(frontRecords.map(record => record.name));
     let inputBytes = 0, expectedOutputBytes = 0;
     const snapshotPixels = (value, label) => {
       const pixels = readPixels(value);
@@ -69,11 +99,19 @@
       return clone(pixels);
     };
     const depth = Math.max(1, ((opts.depth && opts.depth.layers) || opts.depth || 1) | 0);
-    const snapshots = records.map((record, index) => {
+    const snapshots = frontRecords.map((record, index) => {
       const source = snapshotPixels(record.canvas, `${record.name} source`);
       const viewSnapshots = {};
       for (const kind of ['side', 'top', 'depthMap']) if (record[kind]) {
         viewSnapshots[kind] = snapshotPixels(record[kind], `${record.name} ${kind}`);
+      }
+      const siblings = siblingMap.get(modelBaseName(record.name)) || [];
+      for (const { record: sibling, role } of siblings) {
+        if (viewSnapshots[role]) continue;
+        viewSnapshots[role] = snapshotPixels(sibling.canvas, `${sibling.name} ${role}`);
+      }
+      if (opts.inferenceEnabled && !viewSnapshots.back) {
+        viewSnapshots.back = _mirrorBack(source);
       }
       const itemOpts = clone(opts);
       itemOpts.alignment = clone(alignmentFor(record));
@@ -88,6 +126,7 @@
         views: viewSnapshots,
         viewMetadata: clone(record.viewMetadata || {}),
         opts: itemOpts,
+        role: 'front',
       };
     });
     if (expectedOutputBytes > MAX_BATCH_EXPECTED_OUTPUT_BYTES) throw budgetError('BATCH_EXPECTED_OUTPUT_BUDGET_EXCEEDED', `Estimated batch output is ${expectedOutputBytes} bytes; maximum is ${MAX_BATCH_EXPECTED_OUTPUT_BYTES}`);
@@ -97,14 +136,14 @@
     if (!Number.isInteger(index) || index < 0 || index >= manifest.totalJobs) return null;
     const recordIndex = Math.floor(index / manifest.totalFrames), frame = index % manifest.totalFrames;
     const record = manifest.records[recordIndex];
+    if (!record || record.role !== 'front') return null;
     const views = { frame, views: [] };
-    const roles = { side: 'side', top: 'top', depthMap: 'depthmap' };
-    for (const kind of Object.keys(roles)) {
+    for (const kind of Object.keys(record.views)) {
       const source = record.views[kind];
       if (!source) continue;
       const metadata = record.viewMetadata[kind] || { frameMode: 'static' };
       const pixels = metadata.frameMode === 'sheet' ? slicePixels(source, manifest.sheet, frame) : cloneValue(source);
-      views.views.push({ role: roles[kind], pixels, confidence: 1, frameMetadata: { ...cloneValue(metadata), selectedFrame: frame } });
+      views.views.push({ role: viewRole(kind), pixels, confidence: 1, frameMetadata: { ...cloneValue(metadata), selectedFrame: frame } });
     }
     return {
       recordIndex,

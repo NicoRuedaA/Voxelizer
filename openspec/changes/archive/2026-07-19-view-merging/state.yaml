@@ -1,0 +1,28 @@
+schema: spec-driven
+change: view-merging
+phase: archive
+status: archived-with-warnings
+artifacts:
+  engram:
+    proposal: sdd/view-merging/proposal
+    design: sdd/view-merging/design
+    tasks: sdd/view-merging/tasks
+    apply-progress: sdd/view-merging/apply-progress
+    verify-report: sdd/view-merging/verify-report
+    archive-report: sdd/view-merging/archive-report
+  openspec:
+    proposal: openspec/changes/archive/2026-07-19-view-merging/proposal.md
+    design: openspec/changes/archive/2026-07-19-view-merging/design.md
+    tasks: openspec/changes/archive/2026-07-19-view-merging/tasks.md
+    apply-progress: openspec/changes/archive/2026-07-19-view-merging/apply-progress.md
+    verify-report: openspec/changes/archive/2026-07-19-view-merging/verify-report.md
+    archive-report: openspec/changes/archive/2026-07-19-view-merging/archive-report.md
+next: none
+delivery_strategy: auto-chain
+review_budget: 800
+chain_strategy: stacked-to-main
+current_unit: 4
+warnings:
+  - Missing native review gate (transaction/ledger/receipt/gate-context)
+  - Missing dedicated spec artifact
+  - Verify report contains non-critical preview-path warning

@@ -40,6 +40,13 @@ function loadProfileDepthRuntime() {
   return context.window.VoxelProfileDepth;
 }
 
+function loadPaletteIORuntime() {
+  const context = { window: {}, console };
+  vm.createContext(context);
+  loadScript('palette-io.js', context);
+  return context.window.PaletteIO;
+}
+
 function fakeVector(x = 0, y = 0, z = 0) {
   return { x, y, z, set(nx, ny, nz) { this.x = nx; this.y = ny; this.z = nz; } };
 }
@@ -132,6 +139,7 @@ function fakeElement(id) {
   const listeners = {};
   const el = {
     id,
+    tagName: String(id).toUpperCase(),
     textContent: '',
     innerHTML: '',
     value: '',
@@ -158,11 +166,12 @@ function fakeElement(id) {
     dataset: {},
     children,
     replaceChildren(...newChildren) { children.length = 0; children.push(...newChildren); },
-    appendChild(child) { children.push(child); return child; },
+    appendChild(child) { children.push(child); child.parentElement = el; return child; },
     append(...nodes) { children.push(...nodes); },
     removeChild(child) { const i = children.indexOf(child); if (i >= 0) children.splice(i, 1); },
     addEventListener(type, handler) { (listeners[type] ||= []).push(handler); },
     removeEventListener() {},
+    dispatchEvent(event) { const list = listeners[event.type] || []; for (const handler of list) handler(event); },
     getContext() {
       return {
         clearRect() {}, fillRect() {}, drawImage() {}, fillText() {}, strokeRect() {},
@@ -176,6 +185,7 @@ function fakeElement(id) {
     querySelector() { return null; },
     focus() {},
     click() {},
+    remove() { if (el.parentElement && el.parentElement.removeChild) el.parentElement.removeChild(el); },
     getBoundingClientRect() { return { width: 800, height: 600 }; },
   };
   return el;
@@ -189,6 +199,7 @@ function fakeDocument() {
       return elements.get(id);
     },
     createElement(tag) { return fakeElement(tag); },
+    createTextNode(text) { return { textContent: text }; },
     querySelectorAll() { return []; },
     querySelector(selector) {
       if (selector === '.window') {
@@ -261,6 +272,7 @@ function FakeBufferGeometry() {
 }
 FakeBufferGeometry.prototype.setAttribute = function(name, attr) { this.attributes[name] = attr; };
 FakeBufferGeometry.prototype.setIndex = function(idx) { this.index = idx; };
+FakeBufferGeometry.prototype.computeVertexNormals = function() {};
 FakeBufferGeometry.prototype.dispose = function() {};
 
 function FakeFloat32BufferAttribute(array, itemSize) {
@@ -277,6 +289,25 @@ FakeMeshBasicMaterial.prototype.dispose = function() {};
 
 function FakeLineBasicMaterial(opts) { this.opts = opts || {}; }
 FakeLineBasicMaterial.prototype.dispose = function() {};
+
+function FakeColor(r, g, b) { this.r = r; this.g = g; this.b = b; }
+FakeColor.prototype.multiplyScalar = function(s) { this.r *= s; this.g *= s; this.b *= s; return this; };
+FakeColor.prototype.setRGB = function(r, g, b) { this.r = r; this.g = g; this.b = b; return this; };
+
+function FakeMeshStandardMaterial(opts) {
+  this.opts = opts || {};
+  const color = this.opts.color || {};
+  this.color = { r: color.r || 0, g: color.g || 0, b: color.b || 0 };
+  this.metalness = this.opts.metalness != null ? this.opts.metalness : 0;
+  this.roughness = this.opts.roughness != null ? this.opts.roughness : 1;
+  const emissive = this.opts.emissive || {};
+  this.emissive = { r: emissive.r || 0, g: emissive.g || 0, b: emissive.b || 0 };
+  this.side = this.opts.side;
+}
+FakeMeshStandardMaterial.prototype.dispose = function() {};
+
+function FakeAmbientLight(color, intensity) { this.color = color; this.intensity = intensity; }
+function FakeDirectionalLight(color, intensity) { this.color = color; this.intensity = intensity; this.position = fakeVector3(); }
 
 function FakeMesh(geo, mat) {
   this.kind = 'mesh';
@@ -317,7 +348,7 @@ function FakeVector3(x, y, z) { this.x = x; this.y = y; this.z = z; this.normali
 
 function FakeGridHelper() { this.position = fakeVector3(); }
 
-function FakeScene() { this.add = function() {}; }
+function FakeScene() { this.children = []; this.add = function(child) { this.children.push(child); }; }
 
 function loadAppRuntime() {
   const context = {};
@@ -340,6 +371,7 @@ function loadAppRuntime() {
   context.TextEncoder = TextEncoder;
   context.performance = { now() { return 0; } };
   context.URL = { createObjectURL() { return 'blob:fake'; }, revokeObjectURL() {} };
+  context.Blob = function Blob(parts, opts) { this.parts = parts; this.opts = opts; };
   context.THREE = {
     WebGLRenderer: FakeWebGLRenderer,
     Scene: FakeScene,
@@ -353,12 +385,16 @@ function loadAppRuntime() {
     BufferGeometry: FakeBufferGeometry,
     Float32BufferAttribute: FakeFloat32BufferAttribute,
     MeshBasicMaterial: FakeMeshBasicMaterial,
+    MeshStandardMaterial: FakeMeshStandardMaterial,
     LineBasicMaterial: FakeLineBasicMaterial,
+    AmbientLight: FakeAmbientLight,
+    DirectionalLight: FakeDirectionalLight,
+    Color: FakeColor,
     Vector3: FakeVector3,
     DoubleSide: 2,
   };
   vm.createContext(context);
-  const scripts = ['transfer.js', 'batch.js', 'worker-channel.js', 'profile-depth.js', 'viewport.js', 'voxel.js', 'voxio.js', 'zip.js', 'app.js'];
+  const scripts = ['transfer.js', 'batch.js', 'worker-channel.js', 'profile-depth.js', 'viewport.js', 'voxel.js', 'voxio.js', 'palette-io.js', 'zip.js', 'app.js'];
   for (const file of scripts) loadScript(file, context);
   return context;
 }
@@ -463,6 +499,30 @@ function makeVoxelResult(marker) {
     metrics: {},
     diagnostics: { warnings: [] },
     marker,
+  };
+}
+
+function fakeCanvas(w, h, fill = [0, 0, 0, 255]) {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = fill[0];
+    data[i * 4 + 1] = fill[1];
+    data[i * 4 + 2] = fill[2];
+    data[i * 4 + 3] = fill[3];
+  }
+  return {
+    width: w,
+    height: h,
+    getContext(type) {
+      return {
+        imageSmoothingEnabled: false,
+        drawImage() {},
+        getImageData() { return { data }; },
+        clearRect() {}, fillRect() {}, fillText() {}, strokeRect() {},
+        beginPath() {}, moveTo() {}, lineTo() {}, quadraticCurveTo() {}, closePath() {},
+        fill() {}, arc() {}, scale() {},
+      };
+    },
   };
 }
 
@@ -1948,4 +2008,2089 @@ test('manifest batch snapshottea una vez, genera lazy, limita memoria y nombres 
   }), error => error.code === 'BATCH_INPUT_BUDGET_EXCEEDED');
   assert.equal(clonedPixelPayloads, 1, 'the over-budget source must be rejected before clone');
   assert.throws(() => Batch.appendOutput([], [{ name: 'x.bin', data: new Uint8Array(4) }], { bytes: 0, maxBytes: 3 }), error => error.code === 'BATCH_OUTPUT_BUDGET_EXCEEDED');
+});
+
+// ---------- Unit 1: view-merging foundation + UI role selector ----------
+
+test('app addItem crea item con rol front por defecto', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const rec = dbg.addItem('hero.png', canvas, 'done', false);
+  assert.equal(rec.role, 'front');
+});
+
+test('app renderiza selector de rol en cada item', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const rec = dbg.addItem('hero.png', canvas, 'done', false);
+  const meta = rec.el.children.find(child => child.className === 'meta');
+  assert.ok(meta);
+  const roleSel = meta.children.find(child => child.className === 'role');
+  assert.ok(roleSel);
+  assert.equal(roleSel.value, 'front');
+  assert.equal(roleSel.getAttribute('aria-label'), 'Vista ortográfica');
+  const options = roleSel.children.map(opt => opt.value);
+  assert.deepEqual(options, ['front', 'back', 'left', 'right', 'top']);
+});
+
+test('findModel devuelve hermanos con mismo nombre base de modelo', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const front = dbg.addItem('hero.png', canvas, 'done', false);
+  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
+  const frontNamed = dbg.addItem('hero-front.png', canvas, 'done', false);
+  const other = dbg.addItem('enemy.png', canvas, 'done', false);
+  const model = dbg.findModel(front);
+  assert.ok(model.includes(front));
+  assert.ok(model.includes(back));
+  assert.ok(model.includes(frontNamed));
+  assert.ok(!model.includes(other));
+  assert.equal(model.length, 3);
+});
+
+test('getItemViews emite vistas con roles de hermanos del modelo activo', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const frontCanvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const backCanvas = fakeCanvas(2, 2, [0, 0, 255, 255]);
+  const leftCanvas = fakeCanvas(2, 2, [0, 255, 0, 255]);
+  const front = dbg.addItem('hero.png', frontCanvas, 'done', false);
+  const back = dbg.addItem('hero-back.png', backCanvas, 'done', false);
+  back.role = 'back';
+  const left = dbg.addItem('hero-left.png', leftCanvas, 'done', false);
+  left.role = 'left';
+  const views = dbg.getItemViews(front);
+  assert.equal(views.views.length, 2);
+  const roles = views.views.map(view => view.role);
+  assert.ok(roles.includes('back'));
+  assert.ok(roles.includes('left'));
+  assert.ok(!roles.includes('front'));
+  const backView = views.views.find(view => view.role === 'back');
+  assert.equal(backView.pixels.data.length, backCanvas.getContext('2d').getImageData().data.length);
+  assert.equal(backView.pixels.data[0], 0);
+  assert.equal(backView.pixels.data[2], 255);
+});
+
+test('batch manifest snapshottea rol y filtra registros front', () => {
+  const context = { window: {}, console, structuredClone, TextEncoder };
+  vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
+  const Batch = context.window.VoxelBatch;
+  const source = makePixels(2, 2, () => [255, 0, 0, 255]);
+  const back = makePixels(2, 2, () => [0, 0, 255, 255]);
+  const records = [
+    { name: 'hero.png', canvas: source, role: 'front' },
+    { name: 'hero-back.png', canvas: back, role: 'back' },
+    { name: 'enemy.png', canvas: source, role: 'front' },
+  ];
+  const manifest = Batch.createManifest(records, { depth: 2 }, { c: 1, r: 1 }, {
+    readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
+  });
+  assert.equal(manifest.records.length, 2);
+  assert.equal(manifest.totalJobs, 2);
+  assert.ok(manifest.records.every(record => record.role === 'front'));
+  const hero = manifest.records.find(record => record.archiveBase === 'hero');
+  assert.ok(hero);
+  assert.equal(hero.views.back.w, 2);
+  assert.deepEqual(Array.from(hero.views.back.data), Array.from(back.data));
+});
+
+test('jobAt solo crea trabajos front y adjunta vistas de hermanos', () => {
+  const context = { window: {}, console, structuredClone, TextEncoder };
+  vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
+  const Batch = context.window.VoxelBatch;
+  const source = makePixels(2, 2, () => [255, 0, 0, 255]);
+  const back = makePixels(2, 2, () => [0, 0, 255, 255]);
+  const records = [
+    { name: 'hero.png', canvas: source, role: 'front' },
+    { name: 'hero-back.png', canvas: back, role: 'back' },
+  ];
+  const manifest = Batch.createManifest(records, { depth: 2 }, { c: 1, r: 1 }, {
+    readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
+  });
+  const job = Batch.jobAt(manifest, 0);
+  assert.equal(job.name, 'hero.png');
+  assert.equal(job.archiveBase, 'hero');
+  assert.equal(job.views.views.length, 1);
+  assert.equal(job.views.views[0].role, 'back');
+  assert.equal(job.views.views[0].pixels.data.length, back.data.length);
+  assert.equal(Batch.jobAt(manifest, 1), null);
+});
+
+// ---------- Unit 2: back-view silhouette fusion ----------
+
+test('normalizeViewInputs acepta rol back y rechaza orientacion no canonica', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const back = makePixels(1, 1, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2;
+  const valid = Voxel.normalizeViewInputs({ views: [{ id: 'rear', role: 'back', pixels: back }] }, config);
+  assert.equal(valid[0].role, 'back');
+  assert.equal(valid[0].valid, true);
+  assert.equal(valid[0].issues.length, 0);
+  const invalid = Voxel.voxelize(front, config, { views: [{
+    id: 'bad-rear', role: 'back', pixels: back,
+    orientation: { projection: 'orthographic', horizontal: '+X', vertical: '-Y' },
+  }] });
+  assert.ok(invalid.diagnostics.warnings.some(w => w.code === 'UNSUPPORTED_ORIENTATION' && w.view === 'bad-rear'));
+});
+
+test('prepareSilhouettes muestrea back a W x H con peso frontWeight', () => {
+  const { Voxel } = loadRuntime();
+  const back = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 255, 255, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  const silhouettes = Voxel.prepareSilhouettes(config, { views: [{ id: 'rear', role: 'back', pixels: back }] }, [3, 3, 2]);
+  assert.equal(silhouettes.prepared.length, 1);
+  const prepared = silhouettes.prepared[0];
+  assert.equal(prepared.w, 3);
+  assert.equal(prepared.h, 3);
+  assert.equal(prepared.role, 'back');
+  assert.equal(Voxel._viewSample(prepared, 1, 1, 0), 1 + 3 * 1);
+  assert.equal(Voxel._viewSample(prepared, 2, 0, 1), 2 + 3 * 0);
+  const weight = Voxel._viewWeight(prepared, config);
+  assert.equal(weight, config.reconstruction.frontWeight);
+  assert.ok(silhouettes.previews.back);
+  assert.equal(silhouettes.previews.back.id, 'rear');
+});
+
+test('fusion front+back recorta la huella a la interseccion de siluetas', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(5, 5, (x, y) => (x >= 1 && x <= 3 && y >= 1 && y <= 3 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const back = makePixels(5, 5, (x, y) => (x === 2 && y === 2 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  assert.equal(result.dims[0], 5);
+  assert.equal(result.dims[1], 5);
+  assert.equal(result.dims[2], 2);
+  assert.equal(result.voxels, 2);
+  const center = 2;
+  const y = result.dims[1] - 1 - 2;
+  for (let z = 0; z < result.dims[2]; z++) {
+    for (let x = 0; x < result.dims[0]; x++) {
+      const index = x + result.dims[0] * (y + result.dims[1] * z);
+      if (x === center) assert.ok(result.grid[index] >= 0, `voxel should exist at x=${x}`);
+      else assert.equal(result.grid[index], -1, `voxel should be empty at x=${x}`);
+    }
+  }
+});
+
+test('color back se mezcla en la cara -Z cuando color.back es auxiliary', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const back = makePixels(1, 1, () => [0, 0, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2;
+  config.color.mode = 'auxiliary'; config.color.back = 'auxiliary';
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  const backFace = result.greedyFacesList.find(face => face.normal[2] === -1);
+  assert.ok(backFace);
+  const backColor = result.palette[backFace.color];
+  assert.equal(backColor[0], 0);
+  assert.equal(backColor[1], 0);
+  assert.equal(backColor[2], 255);
+  const frontFace = result.greedyFacesList.find(face => face.normal[2] === 1);
+  assert.ok(frontFace);
+  const frontColor = result.palette[frontFace.color];
+  assert.equal(frontColor[0], 255);
+  assert.equal(frontColor[1], 0);
+  assert.equal(frontColor[2], 0);
+});
+
+test('back mas ancho que front no expande la huella frontal', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const back = makePixels(3, 3, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  assert.equal(result.voxels, 2);
+  assert.deepEqual(Array.from(result.dims), [3, 3, 2]);
+});
+
+test('politica back front ignora la vista back en color por defecto', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const back = makePixels(1, 1, () => [0, 0, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2;
+  config.color.mode = 'auxiliary'; config.color.back = 'front';
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  const backFace = result.greedyFacesList.find(face => face.normal[2] === -1);
+  assert.ok(backFace);
+  const backColor = result.palette[backFace.color];
+  assert.equal(backColor[0], 255);
+  assert.equal(backColor[1], 0);
+  assert.equal(backColor[2], 0);
+});
+
+// ---------- Unit 3: left/right/top silhouette roles ----------
+
+test('normalizeViewInputs acepta roles left, right y top con ejes canonicos', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(1, 1, () => [255, 0, 0, 255]);
+  const left = makePixels(1, 1, () => [255, 255, 255, 255]);
+  const right = makePixels(1, 1, () => [255, 255, 255, 255]);
+  const top = makePixels(1, 1, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2;
+  const views = {
+    views: [
+      { id: 'l', role: 'left', pixels: left },
+      { id: 'r', role: 'right', pixels: right },
+      { id: 't', role: 'top', pixels: top },
+    ],
+  };
+  const normalized = Voxel.normalizeViewInputs(views, config);
+  const roles = normalized.map(view => view.role);
+  assert.ok(roles.includes('left'));
+  assert.ok(roles.includes('right'));
+  assert.ok(roles.includes('top'));
+  assert.ok(normalized.every(view => view.valid && view.issues.length === 0));
+  const invalid = Voxel.voxelize(front, config, {
+    views: [
+      { id: 'bad-left', role: 'left', pixels: left, orientation: { projection: 'orthographic', horizontal: '+X', vertical: '-Y' } },
+    ],
+  });
+  assert.ok(invalid.diagnostics.warnings.some(w => w.code === 'UNSUPPORTED_ORIENTATION' && w.view === 'bad-left'));
+});
+
+test('prepareSilhouettes dimensiona left/right a D x H y top a W x D', () => {
+  const { Voxel } = loadRuntime();
+  const left = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const right = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const top = makePixels(5, 4, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  const silhouettes = Voxel.prepareSilhouettes(config, {
+    views: [
+      { id: 'l', role: 'left', pixels: left },
+      { id: 'r', role: 'right', pixels: right },
+      { id: 't', role: 'top', pixels: top },
+    ],
+  }, [5, 3, 4]);
+  const leftView = silhouettes.prepared.find(view => view.role === 'left');
+  const rightView = silhouettes.prepared.find(view => view.role === 'right');
+  const topView = silhouettes.prepared.find(view => view.role === 'top');
+  assert.equal(leftView.w, 4);
+  assert.equal(leftView.h, 3);
+  assert.equal(rightView.w, 4);
+  assert.equal(rightView.h, 3);
+  assert.equal(topView.w, 5);
+  assert.equal(topView.h, 4);
+});
+
+test('_viewSample mapea left, right y top segun ejes del diseno', () => {
+  const { Voxel } = loadRuntime();
+  const left = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const right = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const top = makePixels(5, 4, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  const silhouettes = Voxel.prepareSilhouettes(config, {
+    views: [
+      { id: 'l', role: 'left', pixels: left },
+      { id: 'r', role: 'right', pixels: right },
+      { id: 't', role: 'top', pixels: top },
+    ],
+  }, [5, 3, 4]);
+  const leftView = silhouettes.prepared.find(view => view.role === 'left');
+  const rightView = silhouettes.prepared.find(view => view.role === 'right');
+  const topView = silhouettes.prepared.find(view => view.role === 'top');
+  assert.equal(Voxel._viewSample(rightView, 2, 1, 3), 3 + 4 * 1);
+  assert.equal(Voxel._viewSample(leftView, 2, 1, 3), (4 - 1 - 3) + 4 * 1);
+  assert.equal(Voxel._viewSample(topView, 2, 1, 3), 2 + 5 * 3);
+});
+
+test('_viewWeight asigna sideWeight a left/right y topWeight a top', () => {
+  const { Voxel } = loadRuntime();
+  const left = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const right = makePixels(4, 3, () => [255, 255, 255, 255]);
+  const top = makePixels(5, 4, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig();
+  config.reconstruction.sideWeight = 1.7;
+  config.reconstruction.topWeight = 2.3;
+  config.depth.layers = 2; config.silhouette.alphaThreshold = 1;
+  const silhouettes = Voxel.prepareSilhouettes(config, {
+    views: [
+      { id: 'l', role: 'left', pixels: left },
+      { id: 'r', role: 'right', pixels: right },
+      { id: 't', role: 'top', pixels: top },
+    ],
+  }, [5, 3, 4]);
+  const leftView = silhouettes.prepared.find(view => view.role === 'left');
+  const rightView = silhouettes.prepared.find(view => view.role === 'right');
+  const topView = silhouettes.prepared.find(view => view.role === 'top');
+  assert.equal(Voxel._viewWeight(leftView, config), 1.7);
+  assert.equal(Voxel._viewWeight(rightView, config), 1.7);
+  assert.equal(Voxel._viewWeight(topView, config), 2.3);
+});
+
+test('fusion front+back+right recorta la profundidad Z por la silueta lateral', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(5, 5, (x, y) => (x >= 1 && x <= 3 && y >= 1 && y <= 3 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const back = makePixels(5, 5, (x, y) => (x === 2 && y === 2 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const right = makePixels(4, 5, (z, y) => (z === 2 && y >= 1 && y <= 3 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 4; config.silhouette.alphaThreshold = 1;
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, {
+    views: [
+      { id: 'rear', role: 'back', pixels: back },
+      { id: 'right', role: 'right', pixels: right },
+    ],
+  });
+  assert.deepEqual(Array.from(result.dims), [5, 5, 4]);
+  assert.equal(result.voxels, 1);
+  const y = result.dims[1] - 1 - 2;
+  for (let z = 0; z < result.dims[2]; z++) {
+    for (let x = 0; x < result.dims[0]; x++) {
+      const index = x + result.dims[0] * (y + result.dims[1] * z);
+      if (x === 2 && z === 2) assert.ok(result.grid[index] >= 0, `voxel should exist at x=${x}, z=${z}`);
+      else assert.equal(result.grid[index], -1, `voxel should be empty at x=${x}, z=${z}`);
+    }
+  }
+});
+
+test('colores auxiliares de left/right/top se mezclan en caras laterales y cenital', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(2, 2, () => [255, 0, 0, 255]);
+  const right = makePixels(2, 2, () => [0, 0, 255, 255]);
+  const top = makePixels(2, 2, () => [0, 255, 0, 255]);
+  const config = Voxel.createDefaultConfig(); config.depth.layers = 2;
+  config.color.mode = 'auxiliary'; config.color.back = 'front';
+  config.material.enabled = false;
+  const result = Voxel.voxelize(front, config, {
+    views: [
+      { id: 'right', role: 'right', pixels: right },
+      { id: 'top', role: 'top', pixels: top },
+    ],
+  });
+  const rightFace = result.greedyFacesList.find(face => face.normal[0] === 1);
+  assert.ok(rightFace);
+  const rightColor = result.palette[rightFace.color];
+  assert.equal(rightColor[0], 0);
+  assert.equal(rightColor[1], 0);
+  assert.equal(rightColor[2], 255);
+  const topFace = result.greedyFacesList.find(face => face.normal[1] === 1);
+  assert.ok(topFace);
+  const topColor = result.palette[topFace.color];
+  assert.equal(topColor[0], 0);
+  assert.equal(topColor[1], 255);
+  assert.equal(topColor[2], 0);
+});
+
+// ---------- Phase 6: Cleanup UI selectors ----------
+
+test('roleAxisHint devuelve ejes canonicos para cada rol', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  assert.equal(dbg.roleAxisHint('front'), '+X / -Y');
+  assert.equal(dbg.roleAxisHint('back'), '-X / -Y');
+  assert.equal(dbg.roleAxisHint('left'), '-Z / -Y');
+  assert.equal(dbg.roleAxisHint('right'), '+Z / -Y');
+  assert.equal(dbg.roleAxisHint('top'), '+X / +Z');
+  assert.equal(dbg.roleAxisHint('unknown'), '');
+});
+
+test('hasFrontSibling devuelve false solo para items sin vista frontal propia ni hermano', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const front = dbg.addItem('hero.png', canvas, 'done', false);
+  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
+  back.role = 'back';
+  const other = dbg.addItem('enemy.png', canvas, 'done', false);
+  other.role = 'back';
+  const lone = dbg.addItem('lone-back.png', canvas, 'done', false);
+  lone.role = 'back';
+  assert.equal(dbg.hasFrontSibling(front), true);
+  assert.equal(dbg.hasFrontSibling(back), true);
+  assert.equal(dbg.hasFrontSibling(other), false);
+  assert.equal(dbg.hasFrontSibling(lone), false);
+});
+
+test('selector de rol se deshabilita para item sin hermano frontal', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
+  back.role = 'back';
+  dbg.refreshRoleSelectors();
+  const meta = back.el.children.find(child => child.className === 'meta');
+  const roleSel = meta.children.find(child => child.className === 'role');
+  assert.equal(roleSel.disabled, true);
+  assert.ok(roleSel.title.includes('frontal'));
+});
+
+test('selector de rol se habilita cuando existe un hermano frontal', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const front = dbg.addItem('hero.png', canvas, 'done', false);
+  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
+  back.role = 'back';
+  dbg.refreshRoleSelectors();
+  const meta = back.el.children.find(child => child.className === 'meta');
+  const roleSel = meta.children.find(child => child.className === 'role');
+  assert.equal(roleSel.disabled, false);
+  assert.equal(roleSel.title, '');
+});
+
+test('renderiza pista de eje junto al selector de rol', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const rec = dbg.addItem('hero.png', canvas, 'done', false);
+  const meta = rec.el.children.find(child => child.className === 'meta');
+  const hint = meta.children.find(child => child.className === 'role-hint');
+  assert.ok(hint);
+  assert.equal(hint.textContent, '+X / -Y');
+});
+
+test('pista de eje se actualiza al cambiar el rol', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const rec = dbg.addItem('hero.png', canvas, 'done', false);
+  const meta = rec.el.children.find(child => child.className === 'meta');
+  const roleSel = meta.children.find(child => child.className === 'role');
+  const hint = meta.children.find(child => child.className === 'role-hint');
+  roleSel.value = 'top';
+  roleSel.dispatchEvent({ type: 'change' });
+  assert.equal(hint.textContent, '+X / +Z');
+});
+
+test('cambiar a rol frontal habilita selectores de hermanos', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
+  back.role = 'back';
+  dbg.refreshRoleSelectors();
+  assert.equal(back.roleSel.disabled, true);
+  const front = dbg.addItem('hero.png', canvas, 'done', false);
+  // After adding the front sibling, the back selector should become enabled.
+  dbg.refreshRoleSelectors();
+  assert.equal(back.roleSel.disabled, false);
+});
+
+// ---------- Phase 7: Mirrored-back inference ----------
+
+test('inferViews devuelve null cuando inference.enabled es false', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(2, 2, (x, y) => [x * 127, y * 127, 0, 255]);
+  const disabled = Voxel.createDefaultConfig();
+  disabled.inference.enabled = false;
+  assert.equal(Voxel.inferViews(front, disabled), null);
+});
+
+test('inferViews espeja filas horizontalmente y conserva alpha', () => {
+  const { Voxel } = loadRuntime();
+  const two = makePixels(2, 2, (x, y) => [x * 100, y * 100, 50, x === 0 ? 255 : 128]);
+  const config = Voxel.createDefaultConfig();
+  config.inference.enabled = true;
+  const inferred2 = Voxel.inferViews(two, config);
+  assert.equal(inferred2.role, 'back');
+  assert.equal(inferred2.pixels.w, 2);
+  assert.equal(inferred2.pixels.h, 2);
+  assert.deepEqual(Array.from(inferred2.pixels.data), [100, 0, 50, 128, 0, 0, 50, 255, 100, 100, 50, 128, 0, 100, 50, 255]);
+
+  const three = makePixels(3, 3, (x, y) => [x * 80, y * 80, 120, x === 1 ? 200 : 255]);
+  const inferred3 = Voxel.inferViews(three, config);
+  assert.equal(inferred3.pixels.w, 3);
+  assert.equal(inferred3.pixels.h, 3);
+  for (let y = 0; y < 3; y++) {
+    for (let x = 0; x < 3; x++) {
+      const src = ((2 - x) + 3 * y) * 4;
+      const dst = (x + 3 * y) * 4;
+      assert.equal(inferred3.pixels.data[dst], three.data[src], `r at ${x},${y}`);
+      assert.equal(inferred3.pixels.data[dst + 3], three.data[src + 3], `a at ${x},${y}`);
+    }
+  }
+});
+
+test('inferencia no reemplaza una vista back real', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const realBack = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [0, 0, 255, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 2; config.silhouette.alphaThreshold = 1; config.material.enabled = false;
+  config.color.back = 'auxiliary';
+  config.inference.enabled = true;
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'real-rear', role: 'back', pixels: realBack }] });
+  const backView = result.diagnostics.views.find(view => view.role === 'back');
+  assert.ok(backView);
+  assert.equal(backView.id, 'real-rear');
+  const backFace = result.greedyFacesList.find(face => face.normal[2] === -1);
+  assert.ok(backFace);
+  assert.deepEqual(Array.from(result.palette[backFace.color]), [0, 0, 255]);
+});
+
+test('inferencia provee una vista back cuando solo hay frontal y esta habilitada', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 2; config.silhouette.alphaThreshold = 1; config.material.enabled = false;
+  config.inference.enabled = true;
+  const result = Voxel.voxelize(front, config, {});
+  const backView = result.debug.silhouettes.back;
+  assert.ok(backView, 'inferred back view should be prepared');
+  assert.equal(backView.role, 'back');
+  assert.equal(backView.w, 3);
+  assert.equal(backView.h, 3);
+  assert.equal(result.diagnostics.views.find(view => view.role === 'back').iou, 1);
+});
+
+test('inferencia deshabilitada conserva el comportamiento previo', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 2; config.silhouette.alphaThreshold = 1; config.material.enabled = false;
+  const baseline = Voxel.voxelize(front, config, {});
+  config.inference.enabled = false;
+  const disabled = Voxel.voxelize(front, config, {});
+  assert.deepEqual(Array.from(disabled.grid), Array.from(baseline.grid));
+  assert.deepEqual(disabled.dims, baseline.dims);
+  assert.equal(disabled.debug.silhouettes.back, null);
+  assert.equal(disabled.diagnostics.views.find(view => view.role === 'back'), undefined);
+});
+
+test('inferencia con back deshabilitado no genera vista trasera', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(3, 3, (x, y) => (x === 1 && y === 1 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 2; config.silhouette.alphaThreshold = 1; config.material.enabled = false;
+  config.inference.enabled = true;
+  config.inference.back = false;
+
+  assert.equal(Voxel.inferViews(front, config), null);
+
+  const result = Voxel.voxelize(front, config, {});
+  assert.equal(result.debug.silhouettes.back, null);
+  assert.equal(result.diagnostics.views.find(view => view.role === 'back'), undefined);
+});
+
+test('batch manifest incluye vista back inferida sin registros extras', () => {
+  const context = { window: {}, console, structuredClone, TextEncoder };
+  vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
+  const Batch = context.window.VoxelBatch;
+  const source = makePixels(3, 2, (x, y) => [x * 80, y * 80, 120, 255]);
+  const records = [{ name: 'hero.png', canvas: source, role: 'front' }];
+  const manifest = Batch.createManifest(records, { depth: 2, inferenceEnabled: true }, { c: 1, r: 1 }, {
+    readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
+  });
+  assert.equal(manifest.records.length, 1);
+  assert.equal(manifest.totalJobs, 1);
+  assert.ok(manifest.records[0].views.back);
+  assert.equal(manifest.records[0].views.back.w, 3);
+  assert.equal(manifest.records[0].views.back.h, 2);
+  const expectedBack = makePixels(3, 2, (x, y) => [((2 - x) * 80), y * 80, 120, 255]);
+  assert.deepEqual(Array.from(manifest.records[0].views.back.data), Array.from(expectedBack.data));
+  const job = Batch.jobAt(manifest, 0);
+  assert.equal(job.views.views.length, 1);
+  assert.equal(job.views.views[0].role, 'back');
+  assert.equal(job.views.views[0].pixels.data[0], expectedBack.data[0]);
+
+  const noInference = Batch.createManifest(records, { depth: 2, inferenceEnabled: false }, { c: 1, r: 1 }, {
+    readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
+  });
+  assert.equal(noInference.records[0].views.back, undefined);
+
+  const withRealBack = makePixels(3, 2, () => [0, 0, 255, 255]);
+  const recordsWithBack = [
+    { name: 'hero.png', canvas: source, role: 'front' },
+    { name: 'hero-back.png', canvas: withRealBack, role: 'back' },
+  ];
+  const manifestWithBack = Batch.createManifest(recordsWithBack, { depth: 2, inferenceEnabled: true }, { c: 1, r: 1 }, {
+    readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
+  });
+  assert.deepEqual(Array.from(manifestWithBack.records[0].views.back.data), Array.from(withRealBack.data));
+});
+
+test('inferencia activada produce silueta y colores traseros desde solo frontal', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(5, 5, (x, y) => (x >= 1 && x <= 3 && y >= 1 && y <= 3 ? [255, 0, 0, 255] : [0, 0, 0, 0]));
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 3; config.silhouette.alphaThreshold = 1; config.material.enabled = false;
+  config.color.mode = 'auxiliary'; config.color.back = 'auxiliary'; config.inference.enabled = true;
+  const result = Voxel.voxelize(front, config, {});
+  assert.ok(result.debug.silhouettes.back, 'back silhouette should be inferred');
+  assert.equal(result.diagnostics.views.find(view => view.role === 'back').iou, 1);
+  const backFace = result.greedyFacesList.find(face => face.normal[2] === -1);
+  assert.ok(backFace);
+  assert.deepEqual(Array.from(result.palette[backFace.color]), [255, 0, 0]);
+});
+
+test('vista inferida que excede presupuesto de pixeles auxiliares lanza error de presupuesto', () => {
+  const { Voxel } = loadRuntime();
+  const size = 2048;
+  const front = makePixels(size, size, () => [255, 255, 255, 255]);
+  const side = makePixels(size, size, () => [255, 255, 255, 255]);
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 1;
+  config.inference.enabled = true;
+  assert.throws(
+    () => Voxel.voxelize(front, config, { side }),
+    error => error.code === 'AUX_PIXEL_BUDGET_EXCEEDED' || error.code === 'TRANSFORMED_VIEW_BUDGET_EXCEEDED'
+  );
+});
+
+test('toggle de inferencia actualiza state.opts.inferenceEnabled', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  assert.equal(dbg.state.opts.inferenceEnabled, false);
+  const btn = win.document.getElementById('inferenceEnabled');
+  btn.dispatchEvent({ type: 'click' });
+  assert.equal(dbg.state.opts.inferenceEnabled, true);
+  assert.ok(btn.classList.contains('on'));
+  btn.dispatchEvent({ type: 'click' });
+  assert.equal(dbg.state.opts.inferenceEnabled, false);
+  assert.ok(!btn.classList.contains('on'));
+});
+
+// ---------- Unit 4: palette I/O and remapping ----------
+
+// RED: parseGpl tests (task 1.1)
+test('parseGpl lee nombre y colores de un archivo .gpl valido', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const gpl = [
+    'GIMP Palette',
+    'Name: Hero Palette',
+    'Columns: 1',
+    '#',
+    '255 0 0 red',
+    '  0 255 0  green',
+    '0 0 255 blue',
+  ].join('\n');
+  const parsed = PaletteIO.parseGpl(gpl);
+  assert.equal(parsed.name, 'Hero Palette');
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.colors)), [[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+});
+
+test('parseGpl acepta paletas grandes sin truncar', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const lines = ['GIMP Palette', 'Name: Big', 'Columns: 1', '#'];
+  const expected = [];
+  for (let i = 0; i < 64; i++) {
+    lines.push(`${i} ${i} ${i} color-${i}`);
+    expected.push([i, i, i]);
+  }
+  const parsed = PaletteIO.parseGpl(lines.join('\n'));
+  assert.equal(parsed.colors.length, 64);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.colors)), expected);
+});
+
+test('parseGpl roundtrip con serializeGpl conserva nombre y colores', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const colors = [[128, 64, 32], [0, 0, 0], [255, 255, 255]];
+  const serialized = PaletteIO.serializeGpl('Roundtrip', colors);
+  const parsed = PaletteIO.parseGpl(serialized);
+  assert.equal(parsed.name, 'Roundtrip');
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.colors)), colors);
+});
+
+// RED: parseJascPal tests (task 1.3)
+test('parseJascPal lee colores RGB de un archivo .pal valido', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const pal = [
+    'JASC-PAL',
+    '0100',
+    '3',
+    '255 0 0',
+    '0 255 0',
+    '0 0 255',
+  ].join('\n');
+  const parsed = PaletteIO.parseJascPal(pal);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.colors)), [[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+});
+
+test('parseJascPal rechaza encabezado invalido', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const bad = [
+    'RIFF-PAL',
+    '0100',
+    '1',
+    '255 0 0',
+  ].join('\n');
+  assert.throws(() => PaletteIO.parseJascPal(bad), /JASC-PAL/);
+});
+
+test('parseJascPal roundtrip con serializeJascPal conserva colores', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const colors = [[128, 64, 32], [0, 0, 0], [255, 255, 255]];
+  const serialized = PaletteIO.serializeJascPal(colors);
+  const parsed = PaletteIO.parseJascPal(serialized);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.colors)), colors);
+});
+
+// RED: applyRemap tests (task 1.5)
+function makeRemapResult() {
+  return {
+    grid: new Int16Array([0, 1, -1, 0]),
+    dims: [2, 2, 1],
+    voxels: 3,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    greedyFacesList: [{ color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    naiveFacesList: [{ color: 1, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    metrics: {},
+  };
+}
+
+test('applyRemap remapea grid y conserva indices vacios', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResult();
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.deepEqual(Array.from(remapped.grid), [1, 0, -1, 1]);
+  assert.deepEqual(JSON.parse(JSON.stringify(remapped.palette)), editedPalette);
+});
+
+test('applyRemap remapea colores en greedyFacesList y naiveFacesList', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResult();
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.equal(remapped.greedyFacesList[0].color, 1);
+  assert.equal(remapped.naiveFacesList[0].color, 0);
+});
+
+test('applyRemap no muta el resultado original', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResult();
+  const originalGrid = Array.from(result.grid);
+  const originalPalette = JSON.parse(JSON.stringify(result.palette));
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.deepEqual(Array.from(result.grid), originalGrid);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.palette)), originalPalette);
+  assert.equal(result.greedyFacesList[0].color, 0);
+  assert.equal(result.naiveFacesList[0].color, 1);
+});
+
+test('applyRemap lanza error si un indice remapeado excede la paleta editada', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResult();
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  assert.throws(
+    () => PaletteIO.applyRemap(result, editedPalette, [0, 2]),
+    /out of range/
+  );
+});
+
+test('applyRemap lanza error si un indice remapeado es negativo', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResult();
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  assert.throws(
+    () => PaletteIO.applyRemap(result, editedPalette, [-1, 0]),
+    /out of range/
+  );
+});
+
+// ---------- Unit 5: advanced-palette editor state and preview rebuild ----------
+
+function makeTwoColorResult() {
+  return {
+    grid: new Int16Array([0, 1, 0, 1]),
+    dims: [2, 2, 1],
+    voxels: 4,
+    naiveCount: 8,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    greedyFacesList: [
+      { color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { color: 1, normal: [0, 0, 1], corners: [[1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+}
+
+// RED: state.paletteEdit shape tests (task 2.1)
+test('app expone state.paletteEdit con forma inicial vacia', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  assert.ok(Object.prototype.hasOwnProperty.call(dbg.state, 'paletteEdit'), 'paletteEdit must exist on state');
+  assert.equal(dbg.state.paletteEdit, null, 'paletteEdit must be null before a result');
+});
+
+// RED: initPaletteEdit tests (task 2.1)
+test('initPaletteEdit construye estado original, paleta, mapa e identidad dirty', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.initPaletteEdit(result);
+  const edit = dbg.state.paletteEdit;
+  assert.ok(edit);
+  assert.deepEqual(JSON.parse(JSON.stringify(edit.original)), [[255, 0, 0], [0, 255, 0]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(edit.palette)), [[255, 0, 0], [0, 255, 0]]);
+  assert.deepEqual(edit.map, [0, 1]);
+  assert.equal(edit.dirty, false);
+  assert.equal(dbg.state.last, null);
+});
+
+// RED: preview rebuild path tests (task 2.3)
+test('buildPreview no reconstruye cuando paletteEdit es null', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  dbg.state.last = makeTwoColorResult();
+  const preview = dbg.buildPreview();
+  assert.equal(preview, null);
+});
+
+// RED: preview rebuild path tests (task 2.3)
+test('buildPreview no reconstruye cuando paletteEdit no esta dirty', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const preview = dbg.buildPreview();
+  assert.equal(preview, null);
+});
+
+// RED: preview rebuild path tests (task 2.3)
+test('buildPreview reconstruye con paleta editada sin enviar mensaje al worker', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.state.paletteEdit.palette[0] = [0, 0, 255];
+  dbg.state.paletteEdit.dirty = true;
+  const preview = dbg.buildPreview();
+  assert.ok(preview, 'preview result must be produced');
+  assert.deepEqual(JSON.parse(JSON.stringify(preview.palette)), [[0, 0, 255], [0, 255, 0]]);
+  assert.equal(preview.greedyFacesList[0].color, 0, 'first face keeps index 0 after identity remap');
+  assert.equal(preview.greedyFacesList[1].color, 1, 'second face keeps index 1 after identity remap');
+  const mesh = dbg.mesh;
+  assert.ok(mesh, 'mesh must be rebuilt from preview');
+  const colors = mesh.geometry.attributes.color.array;
+  assert.ok(colors.length > 0, 'mesh must have vertex colors');
+  assert.notEqual(colors[0], (255 / 255) * 0.42, 'mesh must not use original red');
+  const stVox = win.document.getElementById('stVox');
+  assert.equal(stVox.textContent, '4', 'readouts must update from preview');
+});
+
+// RED: preview rebuild path tests (task 2.3)
+test('buildPreview remapea indices cuando el mapa cambia', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.state.paletteEdit.palette = [[0, 0, 255]];
+  dbg.state.paletteEdit.map = [0, 0];
+  dbg.state.paletteEdit.dirty = true;
+  const preview = dbg.buildPreview();
+  assert.ok(preview);
+  assert.deepEqual(JSON.parse(JSON.stringify(preview.palette)), [[0, 0, 255]]);
+  assert.deepEqual(Array.from(preview.grid), [0, 0, 0, 0]);
+  assert.equal(preview.greedyFacesList[0].color, 0);
+  assert.equal(preview.greedyFacesList[1].color, 0);
+});
+
+// RED: reset tests (task 2.5)
+test('resetPaletteEdit restaura paleta original y limpia dirty', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.state.paletteEdit.palette[0] = [0, 0, 255];
+  dbg.state.paletteEdit.dirty = true;
+  dbg.resetPaletteEdit();
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[255, 0, 0], [0, 255, 0]]);
+  assert.deepEqual(dbg.state.paletteEdit.map, [0, 1]);
+  assert.equal(dbg.state.paletteEdit.dirty, false);
+  const preview = dbg.buildPreview();
+  assert.equal(preview, null, 'after reset the preview must be the canonical result');
+});
+
+// RED: export integration tests (task 2.3 / 2.5)
+test('effectiveResult devuelve el resultado remapeado cuando paletteEdit esta dirty', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const original = dbg.effectiveResult();
+  assert.equal(original, result, 'clean edit must return canonical result');
+  dbg.state.paletteEdit.palette[0] = [0, 0, 255];
+  dbg.state.paletteEdit.dirty = true;
+  const preview = dbg.effectiveResult();
+  assert.notEqual(preview, result, 'dirty edit must return a preview clone');
+  assert.deepEqual(JSON.parse(JSON.stringify(preview.palette)), [[0, 0, 255], [0, 255, 0]]);
+  assert.deepEqual(Array.from(preview.grid), [0, 1, 0, 1]);
+});
+
+test('effectiveResult devuelve canonical result cuando no hay paletteEdit', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  assert.equal(dbg.effectiveResult(), result);
+});
+
+// ---------- Unit 6: palette editor UI handlers ----------
+
+// RED: edit/reorder/merge map tests (task 3.1)
+test('editPaletteColor actualiza el color y marca dirty', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.editPaletteColor(0, [0, 0, 255]);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette[0])), [0, 0, 255]);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+  assert.deepEqual(dbg.state.paletteEdit.map, [0, 1]);
+});
+
+test('editPaletteColor rechaza indice fuera de rango', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  assert.throws(() => dbg.editPaletteColor(5, [0, 0, 255]), /out of range/);
+  assert.throws(() => dbg.editPaletteColor(-1, [0, 0, 255]), /out of range/);
+});
+
+test('reorderPaletteColor mueve un color y ajusta el mapa', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.reorderPaletteColor(0, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[0, 255, 0], [255, 0, 0]]);
+  assert.deepEqual(dbg.state.paletteEdit.map, [1, 0]);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+});
+
+test('mergePaletteColors combina origen en destino y reduce la paleta', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.mergePaletteColors(1, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[255, 0, 0]]);
+  assert.deepEqual(dbg.state.paletteEdit.map, [0, 0]);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+});
+
+test('mergePaletteColors rechaza indices invalidos', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  assert.throws(() => dbg.mergePaletteColors(0, 5), /out of range/);
+  assert.throws(() => dbg.mergePaletteColors(0, 0), /source and target must be different/);
+});
+
+// RED: import/export file handlers tests (task 3.3)
+test('importPaletteFile aplica un .gpl valido a los primeros colores', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const gpl = [
+    'GIMP Palette',
+    'Name: Imported',
+    'Columns: 1',
+    '#',
+    '10 20 30 c1',
+    '40 50 60 c2',
+  ].join('\n');
+  dbg.importPaletteFile(gpl, 'gpl');
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[10, 20, 30], [40, 50, 60]]);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+});
+
+test('importPaletteFile aplica un .pal JASC valido', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const pal = ['JASC-PAL', '0100', '2', '11 22 33', '44 55 66'].join('\n');
+  dbg.importPaletteFile(pal, 'pal');
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[11, 22, 33], [44, 55, 66]]);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+});
+
+test('importPaletteFile rechaza paleta con mas colores que la actual', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const gpl = ['GIMP Palette', '#', '1 1 1', '2 2 2', '3 3 3'].join('\n');
+  assert.throws(() => dbg.importPaletteFile(gpl, 'gpl'), /too large/);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[255, 0, 0], [0, 255, 0]]);
+});
+
+test('exportPaletteFile devuelve .gpl valido', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const gpl = dbg.exportPaletteFile('gpl');
+  assert.ok(gpl.includes('GIMP Palette'));
+  assert.ok(gpl.includes('255 0 0 color_0'));
+  assert.ok(gpl.includes('0 255 0 color_1'));
+});
+
+test('exportPaletteFile devuelve JASC-.pal valido', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const pal = dbg.exportPaletteFile('pal');
+  assert.ok(pal.startsWith('JASC-PAL\n0100\n2'));
+  assert.ok(pal.includes('255 0 0'));
+  assert.ok(pal.includes('0 255 0'));
+});
+
+test('exportPaletteFile refleja cambios editados en la paleta', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.editPaletteColor(0, [0, 0, 255]);
+  const gpl = dbg.exportPaletteFile('gpl');
+  assert.ok(gpl.includes('0 0 255 color_0'));
+  assert.ok(gpl.includes('0 255 0 color_1'));
+});
+
+// GREEN: UI wiring tests (task 3.4)
+test('boton de restablecer paleta dispara resetPaletteEdit', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.editPaletteColor(0, [0, 0, 255]);
+  const resetBtn = win.document.getElementById('resetPaletteBtn');
+  resetBtn.dispatchEvent({ type: 'click' });
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.palette)), [[255, 0, 0], [0, 255, 0]]);
+  assert.equal(dbg.state.paletteEdit.dirty, false);
+});
+
+test('boton de exportar .gpl descarga el contenido de la paleta', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const exportBtn = win.document.getElementById('exportPaletteGplBtn');
+  assert.doesNotThrow(() => exportBtn.dispatchEvent({ type: 'click' }));
+});
+
+test('boton de exportar .pal descarga el contenido de la paleta', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResult();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  const exportBtn = win.document.getElementById('exportPalettePalBtn');
+  assert.doesNotThrow(() => exportBtn.dispatchEvent({ type: 'click' }));
+});
+
+// ---------- Unit 7: materials-textures foundation (PR #1) ----------
+
+function makeRemapResultWithMaterials() {
+  return {
+    grid: new Int16Array([0, 1, -1, 0]),
+    dims: [2, 2, 1],
+    voxels: 3,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    surfaceMaterials: [
+      { metallic: 0, roughness: 0, emissive: 0 },
+      { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+    ],
+    greedyFacesList: [{ color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    naiveFacesList: [{ color: 1, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    metrics: {},
+  };
+}
+
+// RED: task 1.1
+
+test('voxelize devuelve surfaceMaterials con longitud igual a palette y valores cero por defecto', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(2, 2, () => [255, 0, 0, 255]);
+  const result = Voxel.voxelize(front, Voxel.createDefaultConfig(), {});
+  assert.ok(Array.isArray(result.surfaceMaterials));
+  assert.equal(result.surfaceMaterials.length, result.palette.length);
+  const materials = JSON.parse(JSON.stringify(result.surfaceMaterials));
+  assert.deepEqual(materials, Array(result.palette.length).fill({ metallic: 0, roughness: 0, emissive: 0 }));
+});
+
+// RED: task 1.1 triangulation (multi-color palette)
+
+test('voxelize mantiene surfaceMaterials alineado con paleta multicolor', () => {
+  const { Voxel } = loadRuntime();
+  const front = makePixels(2, 1, x => (x === 0 ? [255, 0, 0, 255] : [0, 255, 0, 255]));
+  const result = Voxel.voxelize(front, Voxel.createDefaultConfig(), {});
+  assert.equal(result.surfaceMaterials.length, result.palette.length);
+  assert.ok(result.surfaceMaterials.length >= 2);
+  assert.ok(result.surfaceMaterials.every(m => m.metallic === 0 && m.roughness === 0 && m.emissive === 0));
+});
+
+// RED: task 1.3
+
+test('applyRemap remapea surfaceMaterials mediante indexMap', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResultWithMaterials();
+  const editedPalette = [[0, 0, 255], [255, 255, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.deepEqual(JSON.parse(JSON.stringify(remapped.surfaceMaterials)), [
+    { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+    { metallic: 0, roughness: 0, emissive: 0 },
+  ]);
+});
+
+// RED: task 1.3 triangulation (merge keeps target material)
+
+test('applyRemap descarta material de origen al combinar en destino', () => {
+  const PaletteIO = loadPaletteIORuntime();
+  const result = makeRemapResultWithMaterials();
+  const editedPalette = [[255, 0, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [0, 0]);
+  assert.equal(remapped.surfaceMaterials.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(remapped.surfaceMaterials[0])), { metallic: 0, roughness: 0, emissive: 0 });
+});
+
+// ---------- Unit 8: materials-textures PBR preview, lighting, and export (PR #2) ----------
+
+function makeModelResultWithMaterials(surfaceMaterials) {
+  return {
+    grid: new Int16Array([0, 1, -1, 0]),
+    dims: [2, 2, 1],
+    voxels: 3,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    surfaceMaterials,
+    greedyFacesList: [
+      { color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { color: 1, normal: [0, 0, 1], corners: [[1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+}
+
+// RED: task 2.1
+
+test('buildModel usa MeshStandardMaterial cuando algun material es no-default', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeModelResultWithMaterials([
+    { metallic: 0, roughness: 0, emissive: 0 },
+    { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+  ]);
+  dbg.buildModel(result);
+  const meshes = dbg.modelGroup.children.filter(o => o.kind === 'mesh');
+  assert.ok(meshes.length > 0, 'PBR path must produce at least one mesh');
+  assert.ok(meshes.every(m => m.material instanceof FakeMeshStandardMaterial), 'PBR path must use MeshStandardMaterial');
+  const pbrMaterial = meshes.find(m => m.material instanceof FakeMeshStandardMaterial && m.material.metalness === 0.8).material;
+  assert.ok(pbrMaterial, 'must have material with metallic 0.8');
+  assert.equal(pbrMaterial.roughness, 0.3);
+  assert.equal(pbrMaterial.emissive.g, 0.5);
+});
+
+// RED: task 2.1 triangulation (flat path)
+
+test('buildModel mantiene MeshBasicMaterial cuando todos los materiales son default', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeModelResultWithMaterials([
+    { metallic: 0, roughness: 0, emissive: 0 },
+    { metallic: 0, roughness: 0, emissive: 0 },
+  ]);
+  dbg.buildModel(result);
+  const meshes = dbg.modelGroup.children.filter(o => o.kind === 'mesh');
+  assert.equal(meshes.length, 1, 'flat path must keep a single mesh');
+  assert.ok(meshes[0].material instanceof FakeMeshBasicMaterial, 'flat path must use MeshBasicMaterial');
+});
+
+// RED: task 2.3
+
+test('exportOBJ emite Pm, Pr y Ke para materiales no-default', () => {
+  const { VoxIO } = loadRuntime();
+  const result = {
+    grid: new Int16Array([0]),
+    dims: [1, 1, 1],
+    voxels: 1,
+    palette: [[255, 128, 0]],
+    surfaceMaterials: [{ metallic: 0.8, roughness: 0.3, emissive: 0.5 }],
+    greedyFacesList: [{ color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    naiveFacesList: [],
+  };
+  const exported = VoxIO.exportOBJ(result, { mtlName: 'pbr.mtl', useAO: false });
+  assert.match(exported.mtl, /Pm 0\.8000/);
+  assert.match(exported.mtl, /Pr 0\.3000/);
+  assert.match(exported.mtl, /Ke 0\.5000 0\.2510 0\.0000/);
+});
+
+// RED: task 2.3 triangulation (default material)
+
+test('exportOBJ omite extensiones PBR para materiales default', () => {
+  const { VoxIO } = loadRuntime();
+  const result = {
+    grid: new Int16Array([0]),
+    dims: [1, 1, 1],
+    voxels: 1,
+    palette: [[255, 0, 0]],
+    surfaceMaterials: [{ metallic: 0, roughness: 0, emissive: 0 }],
+    greedyFacesList: [{ color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] }],
+    naiveFacesList: [],
+  };
+  const exported = VoxIO.exportOBJ(result, { mtlName: 'default.mtl', useAO: false });
+  assert.doesNotMatch(exported.mtl, /Pm/);
+  assert.doesNotMatch(exported.mtl, /Pr/);
+  assert.doesNotMatch(exported.mtl, /Ke/);
+});
+
+// RED: task 2.5
+
+test('la escena contiene luz ambiental y direccional cuando el path PBR esta activo', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeModelResultWithMaterials([
+    { metallic: 0, roughness: 0, emissive: 0 },
+    { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+  ]);
+  dbg.buildModel(result);
+  const ambient = dbg.scene.children.find(o => o instanceof FakeAmbientLight);
+  const directional = dbg.scene.children.find(o => o instanceof FakeDirectionalLight);
+  assert.ok(ambient, 'scene must contain ambient light');
+  assert.ok(directional, 'scene must contain directional light');
+});
+
+// RED: task 2.5 triangulation (flat path does not break)
+
+test('la luz PBR no rompe el path flat', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeModelResultWithMaterials([
+    { metallic: 0, roughness: 0, emissive: 0 },
+    { metallic: 0, roughness: 0, emissive: 0 },
+  ]);
+  dbg.buildModel(result);
+  const meshes = dbg.modelGroup.children.filter(o => o.kind === 'mesh');
+  assert.equal(meshes.length, 1, 'flat path must keep a single mesh');
+  assert.ok(meshes[0].material instanceof FakeMeshBasicMaterial, 'flat path must still use MeshBasicMaterial');
+});
+
+// ---------- Unit 9: materials-textures palette editor UI controls (PR #3) ----------
+
+function makeTwoColorResultWithMaterials() {
+  return {
+    grid: new Int16Array([0, 1, 0, 1]),
+    dims: [2, 2, 1],
+    voxels: 4,
+    naiveCount: 8,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    surfaceMaterials: [
+      { metallic: 0, roughness: 0, emissive: 0 },
+      { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+    ],
+    greedyFacesList: [
+      { color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { color: 1, normal: [0, 0, 1], corners: [[1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+}
+
+// RED: task 3.1
+test('initPaletteEdit copia surfaceMaterials originales y editados', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.initPaletteEdit(result);
+  const edit = dbg.state.paletteEdit;
+  assert.ok(edit);
+  assert.ok(Array.isArray(edit.surfaceMaterials));
+  assert.equal(edit.surfaceMaterials.length, result.surfaceMaterials.length);
+  assert.deepEqual(JSON.parse(JSON.stringify(edit.surfaceMaterials)), result.surfaceMaterials);
+  assert.ok(Array.isArray(edit.originalSurfaceMaterials));
+  assert.deepEqual(JSON.parse(JSON.stringify(edit.originalSurfaceMaterials)), result.surfaceMaterials);
+  assert.notEqual(edit.surfaceMaterials, result.surfaceMaterials, 'must be a copy');
+  assert.notEqual(edit.originalSurfaceMaterials, result.surfaceMaterials, 'must be a copy');
+  assert.notEqual(edit.surfaceMaterials, edit.originalSurfaceMaterials, 'original and edited must be independent');
+});
+
+// RED: task 3.3
+test('editSurfaceMaterial actualiza el material, lo clampa a [0,1] y reconstruye el preview', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  dbg.editSurfaceMaterial(1, 'metallic', 1.5);
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials[1].metallic, 1.0);
+  dbg.editSurfaceMaterial(1, 'roughness', -0.2);
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials[1].roughness, 0.0);
+  dbg.editSurfaceMaterial(1, 'emissive', 0.75);
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials[1].emissive, 0.75);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+  const meshes = dbg.modelGroup.children.filter(o => o.kind === 'mesh');
+  assert.ok(meshes.every(m => m.material instanceof FakeMeshStandardMaterial), 'preview must switch to PBR path');
+});
+
+// RED: task 3.3 triangulation (rejects invalid index)
+test('editSurfaceMaterial rechaza indice fuera de rango', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.initPaletteEdit(result);
+  assert.throws(() => dbg.editSurfaceMaterial(5, 'metallic', 0.5), /out of range/);
+  assert.throws(() => dbg.editSurfaceMaterial(-1, 'emissive', 0.5), /out of range/);
+});
+
+// RED: task 3.5
+test('resetPaletteEdit restaura surfaceMaterials originales', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.initPaletteEdit(result);
+  dbg.editSurfaceMaterial(1, 'metallic', 1.0);
+  dbg.resetPaletteEdit();
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.surfaceMaterials)), result.surfaceMaterials);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.originalSurfaceMaterials)), result.surfaceMaterials);
+  assert.equal(dbg.state.paletteEdit.dirty, false);
+});
+
+// RED: task 3.5 triangulation (reorder)
+test('reorderPaletteColor mueve surfaceMaterials junto con los colores', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.initPaletteEdit(result);
+  dbg.reorderPaletteColor(0, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.surfaceMaterials)), [
+    { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+    { metallic: 0, roughness: 0, emissive: 0 },
+  ]);
+  const preview = dbg.buildPreview();
+  assert.deepEqual(JSON.parse(JSON.stringify(preview.surfaceMaterials)), [
+    { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+    { metallic: 0, roughness: 0, emissive: 0 },
+  ]);
+});
+
+// RED: task 3.5 triangulation (merge)
+test('mergePaletteColors descarta surfaceMaterial del origen y conserva el del destino', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.initPaletteEdit(result);
+  dbg.editSurfaceMaterial(0, 'metallic', 0.5);
+  dbg.mergePaletteColors(1, 0);
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials.length, 1);
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials[0].metallic, 0.5);
+  const preview = dbg.buildPreview();
+  assert.equal(preview.surfaceMaterials.length, 1);
+  assert.equal(preview.surfaceMaterials[0].metallic, 0.5);
+});
+
+// RED: task 3.5 triangulation (import)
+test('importPaletteFile conserva surfaceMaterials de colores no tocados', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.initPaletteEdit(result);
+  dbg.editSurfaceMaterial(1, 'metallic', 1.0);
+  const gpl = ['GIMP Palette', '#', '10 20 30'].join('\n');
+  dbg.importPaletteFile(gpl, 'gpl');
+  assert.deepEqual(JSON.parse(JSON.stringify(dbg.state.paletteEdit.surfaceMaterials)), [
+    { metallic: 0, roughness: 0, emissive: 0 },
+    { metallic: 1.0, roughness: 0.3, emissive: 0.5 },
+  ]);
+});
+
+// RED: task 3.4
+test('updateSwatches renderiza inputs M/R/E por swatch y los cablea a editSurfaceMaterial', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeTwoColorResultWithMaterials();
+  dbg.state.last = result;
+  dbg.state.pixels = { w: 2, h: 2 };
+  dbg.initPaletteEdit(result);
+  dbg.updateSwatches();
+  const swatches = win.document.getElementById('swatches');
+  const items = swatches.children;
+  assert.equal(items.length, 2, 'must render one item per palette entry');
+  const firstItem = items[0];
+  const colorButton = firstItem.children.find(child => child.tagName === 'I');
+  assert.ok(colorButton, 'swatch must contain a color button');
+  const inputs = firstItem.children.filter(child => child.className === 'mat');
+  assert.equal(inputs.length, 3, 'must render M/R/E inputs');
+  const metallicInput = inputs.find(input => input.title === 'M 0');
+  assert.ok(metallicInput, 'must label metallic input');
+  metallicInput.value = '0.5';
+  metallicInput.dispatchEvent({ type: 'change', stopPropagation() {}, target: metallicInput });
+  assert.equal(dbg.state.paletteEdit.surfaceMaterials[0].metallic, 0.5);
+  assert.equal(dbg.state.paletteEdit.dirty, true);
+});
+
+// ---------- Unit 10: glTF/GLB export (PR #1) ----------
+
+function parseGLB(glb) {
+  const bytes = glb instanceof Uint8Array ? glb : new Uint8Array(glb);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = new TextDecoder().decode(bytes.subarray(0, 4));
+  const version = view.getUint32(4, true);
+  const length = view.getUint32(8, true);
+  const jsonLen = view.getUint32(12, true);
+  const jsonType = view.getUint32(16, true);
+  const jsonBytes = bytes.subarray(20, 20 + jsonLen);
+  const json = JSON.parse(new TextDecoder().decode(jsonBytes));
+  let binOffset = 20 + jsonLen;
+  binOffset += (4 - (binOffset % 4)) % 4;
+  const binLen = view.getUint32(binOffset, true);
+  const binType = view.getUint32(binOffset + 4, true);
+  const bin = bytes.subarray(binOffset + 8, binOffset + 8 + binLen);
+  return { magic, version, length, json, bin, jsonLen, binLen, jsonType, binType };
+}
+
+function readAccessor(gltf, bin, accessorIndex) {
+  const accessor = gltf.accessors[accessorIndex];
+  const bufferView = gltf.bufferViews[accessor.bufferView];
+  const offset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0);
+  const componentType = accessor.componentType;
+  const count = accessor.count;
+  const type = accessor.type;
+  const components = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[type];
+  const bytesPerComponent = { 5123: 2, 5125: 4, 5126: 4 }[componentType];
+  const stride = bufferView.byteStride || (components * bytesPerComponent);
+  const values = [];
+  const view = new DataView(bin.buffer, bin.byteOffset + offset, count * stride);
+  for (let i = 0; i < count; i++) {
+    for (let c = 0; c < components; c++) {
+      const idx = i * stride + c * bytesPerComponent;
+      if (componentType === 5126) values.push(view.getFloat32(idx, true));
+      else if (componentType === 5125) values.push(view.getUint32(idx, true));
+      else values.push(view.getUint16(idx, true));
+    }
+  }
+  return { accessor, values, min: accessor.min, max: accessor.max };
+}
+
+function makeCubeResult(opts = {}) {
+  const palette = opts.palette || [[200, 120, 80]];
+  const surfaceMaterials = opts.surfaceMaterials || [{ metallic: 0.8, roughness: 0.3, emissive: 0.5 }];
+  return {
+    grid: new Int16Array([0]),
+    dims: [1, 1, 1],
+    voxels: 1,
+    palette,
+    surfaceMaterials,
+    greedyFacesList: [
+      { normal: [0, 0, 1], color: 0, corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { normal: [0, 0, -1], color: 0, corners: [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]], ao: [1, 1, 1, 1] },
+      { normal: [0, 1, 0], color: 0, corners: [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]], ao: [1, 1, 1, 1] },
+      { normal: [0, -1, 0], color: 0, corners: [[0, 0, 1], [1, 0, 1], [1, 0, 0], [0, 0, 0]], ao: [1, 1, 1, 1] },
+      { normal: [1, 0, 0], color: 0, corners: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]], ao: [1, 1, 1, 1] },
+      { normal: [-1, 0, 0], color: 0, corners: [[0, 0, 1], [0, 0, 0], [0, 1, 0], [0, 1, 1]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+}
+
+function makeManyFacesResult(faceCount) {
+  const faces = [];
+  for (let i = 0; i < faceCount; i++) {
+    faces.push({
+      normal: [0, 0, 1],
+      color: 0,
+      corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+      ao: [1, 1, 1, 1],
+    });
+  }
+  return {
+    grid: new Int16Array([0]),
+    dims: [1, 1, 1],
+    voxels: 1,
+    palette: [[255, 0, 0]],
+    surfaceMaterials: [{ metallic: 0, roughness: 0, emissive: 0 }],
+    greedyFacesList: faces,
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+}
+
+// RED: task 1.1
+test('buildIndexedMesh emits outward winding matching exportOBJ', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeCubeResult();
+  const mesh = VoxIO.buildIndexedMesh(result, {});
+  let idx = 0;
+  for (const face of result.greedyFacesList) {
+    for (let t = 0; t < 2; t++) {
+      const i0 = mesh.indices[idx + t * 3];
+      const i1 = mesh.indices[idx + t * 3 + 1];
+      const i2 = mesh.indices[idx + t * 3 + 2];
+      const p0 = [mesh.positions[i0 * 3], mesh.positions[i0 * 3 + 1], mesh.positions[i0 * 3 + 2]];
+      const p1 = [mesh.positions[i1 * 3], mesh.positions[i1 * 3 + 1], mesh.positions[i1 * 3 + 2]];
+      const p2 = [mesh.positions[i2 * 3], mesh.positions[i2 * 3 + 1], mesh.positions[i2 * 3 + 2]];
+      const e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+      const e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+      const cross = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+      ];
+      const len = Math.hypot(...cross);
+      assert.ok(len > 0, 'triangle must have area');
+      const normalized = cross.map(v => v / len);
+      assert.deepEqual(normalized.map(v => Math.round(v * 1e6) / 1e6), face.normal);
+    }
+    idx += 6;
+  }
+});
+
+// RED: task 2.1
+test('exportGLB throws descriptive error for empty greedyFacesList', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeVoxelResult('empty');
+  assert.throws(() => VoxIO.exportGLB(result, {}), /empty/i);
+});
+
+// RED: task 2.2
+test('exportGLB produces GLB 2.0 with JSON and BIN chunks', () => {
+  const { VoxIO } = loadRuntime();
+  const glb = VoxIO.exportGLB(makeCubeResult(), {});
+  const parsed = parseGLB(glb);
+  assert.equal(parsed.magic, 'glTF');
+  assert.equal(parsed.version, 2);
+  assert.equal(parsed.jsonType, 0x4E4F534A);
+  assert.equal(parsed.binType, 0x004E4942);
+  assert.ok(parsed.json.asset);
+  assert.equal(parsed.json.asset.version, '2.0');
+  assert.equal(parsed.json.meshes.length, 1);
+  assert.equal(parsed.json.buffers[0].byteLength % 4, 0, 'buffer length must be 4-byte aligned');
+});
+
+// RED: task 2.3
+test('exportGLB emits 12 triangles for a 1x1x1 voxel', () => {
+  const { VoxIO } = loadRuntime();
+  const glb = VoxIO.exportGLB(makeCubeResult(), {});
+  const parsed = parseGLB(glb);
+  const mesh = parsed.json.meshes[0];
+  const indexCounts = mesh.primitives.map(p => parsed.json.accessors[p.indices].count);
+  const totalIndices = indexCounts.reduce((a, b) => a + b, 0);
+  assert.equal(totalIndices, 36, '6 faces * 6 indices = 36');
+  assert.equal(totalIndices / 3, 12, '12 triangles');
+  assert.ok(mesh.primitives.every(p => p.mode === 4), 'all primitives use TRIANGLES');
+});
+
+// RED: task 2.4
+test('exportGLB centers at origin and applies scale', () => {
+  const { VoxIO } = loadRuntime();
+  const glb = VoxIO.exportGLB(makeCubeResult(), { scale: 2.5 });
+  const parsed = parseGLB(glb);
+  const primitive = parsed.json.meshes[0].primitives[0];
+  const pos = readAccessor(parsed.json, parsed.bin, primitive.attributes.POSITION);
+  const accessor = pos.accessor;
+  assert.equal(accessor.min[0], -1.25);
+  assert.equal(accessor.max[0], 1.25);
+  assert.equal(accessor.min[1], -1.25);
+  assert.equal(accessor.max[1], 1.25);
+  assert.equal(accessor.min[2], -1.25);
+  assert.equal(accessor.max[2], 1.25);
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < pos.values.length; i += 3) {
+    cx += pos.values[i];
+    cy += pos.values[i + 1];
+    cz += pos.values[i + 2];
+  }
+  const n = pos.values.length / 3;
+  assert.equal(cx / n, 0);
+  assert.equal(cy / n, 0);
+  assert.equal(cz / n, 0);
+});
+
+// RED: task 2.5
+test('exportGLB maps PBR metallic roughness and emissive factors', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeCubeResult({
+    palette: [[255, 128, 0]],
+    surfaceMaterials: [{ metallic: 0.8, roughness: 0.3, emissive: 0.5 }],
+  });
+  const glb = VoxIO.exportGLB(result, {});
+  const parsed = parseGLB(glb);
+  const material = parsed.json.materials[0];
+  assert.equal(material.pbrMetallicRoughness.metallicFactor, 0.8);
+  assert.equal(material.pbrMetallicRoughness.roughnessFactor, 0.3);
+  assert.equal(material.pbrMetallicRoughness.baseColorFactor[0], 1);
+  assert.ok(Math.abs(material.pbrMetallicRoughness.baseColorFactor[1] - 128 / 255) < 1e-6);
+  assert.equal(material.pbrMetallicRoughness.baseColorFactor[2], 0);
+  assert.equal(material.pbrMetallicRoughness.baseColorFactor[3], 1);
+  assert.ok(Math.abs(material.emissiveFactor[0] - 0.5) < 1e-6);
+  assert.ok(Math.abs(material.emissiveFactor[1] - (128 / 255) * 0.5) < 1e-6);
+  assert.equal(material.emissiveFactor[2], 0);
+});
+
+// RED: task 2.7 triangulation (promotion)
+test('exportGLB uses UNSIGNED_SHORT for small meshes and UNSIGNED_INT for large meshes', () => {
+  const { VoxIO } = loadRuntime();
+  const small = VoxIO.exportGLB(makeManyFacesResult(100), {});
+  const smallParsed = parseGLB(small);
+  const smallIdx = smallParsed.json.accessors[smallParsed.json.meshes[0].primitives[0].indices];
+  assert.equal(smallIdx.componentType, 5123, 'UNSIGNED_SHORT for small meshes');
+
+  const large = VoxIO.exportGLB(makeManyFacesResult(10923), {});
+  const largeParsed = parseGLB(large);
+  const largeIdx = largeParsed.json.accessors[largeParsed.json.meshes[0].primitives[0].indices];
+  assert.equal(largeIdx.componentType, 5125, 'UNSIGNED_INT when faces*6 > 65535');
+});
+
+// RED: task 2.8
+test('exportGLB emits COLOR_0 when vertexColors is true and modulates by AO', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeCubeResult({ palette: [[255, 128, 0]] });
+  result.greedyFacesList[0].ao = [1, 0.5, 0.25, 1];
+  const glb = VoxIO.exportGLB(result, { vertexColors: true });
+  const parsed = parseGLB(glb);
+  const primitive = parsed.json.meshes[0].primitives[0];
+  assert.ok(Object.prototype.hasOwnProperty.call(primitive.attributes, 'COLOR_0'), 'COLOR_0 must exist');
+  const colors = readAccessor(parsed.json, parsed.bin, primitive.attributes.COLOR_0);
+  const expected = [1, 128 / 255, 0];
+  for (let v = 0; v < 4; v++) {
+    const ao = result.greedyFacesList[0].ao[v];
+    for (let c = 0; c < 3; c++) {
+      assert.ok(Math.abs(colors.values[v * 3 + c] - expected[c] * ao) < 1e-6,
+        `vertex ${v} channel ${c}: expected ${expected[c] * ao}, got ${colors.values[v * 3 + c]}`);
+    }
+  }
+});
+
+// RED: task 2.8 triangulation (no COLOR_0 by default)
+test('exportGLB omits COLOR_0 when vertexColors is false', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeCubeResult({ palette: [[255, 128, 0]] });
+  const glb = VoxIO.exportGLB(result, {});
+  const parsed = parseGLB(glb);
+  const primitive = parsed.json.meshes[0].primitives[0];
+  assert.equal(Object.prototype.hasOwnProperty.call(primitive.attributes, 'COLOR_0'), false);
+});
+
+// RED: task 2.9 — PBR material index alignment after palette remap
+test('exportGLB uses remapped palette material indices after applyRemap', () => {
+  const { VoxIO } = loadRuntime();
+  const PaletteIO = loadPaletteIORuntime();
+  const result = {
+    grid: new Int16Array([0, 1]),
+    dims: [2, 1, 1],
+    voxels: 2,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    surfaceMaterials: [
+      { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+      { metallic: 0, roughness: 0, emissive: 0 },
+    ],
+    greedyFacesList: [
+      { color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { color: 1, normal: [0, 0, 1], corners: [[1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+  const editedPalette = [[0, 255, 0], [255, 0, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.deepEqual(JSON.parse(JSON.stringify(remapped.palette)), editedPalette);
+  assert.equal(remapped.greedyFacesList[0].color, 1, 'first face remapped to index 1');
+  assert.equal(remapped.greedyFacesList[1].color, 0, 'second face remapped to index 0');
+  assert.equal(remapped.surfaceMaterials[1].metallic, 0.8, 'remapped surfaceMaterials[1] carries original PBR');
+  const glb = VoxIO.exportGLB(remapped, {});
+  const parsed = parseGLB(glb);
+  assert.equal(parsed.json.materials.length, 2);
+  assert.equal(parsed.json.materials[0].pbrMetallicRoughness.metallicFactor, 0);
+  assert.equal(parsed.json.materials[1].pbrMetallicRoughness.metallicFactor, 0.8);
+  const primitives = parsed.json.meshes[0].primitives;
+  assert.equal(primitives.length, 2);
+  assert.equal(primitives[0].material, 1, 'first face primitive references remapped PBR material');
+  assert.equal(primitives[1].material, 0, 'second face primitive references remapped default material');
+});
+
+// RED: task 1.3
+test('exportFBX stub throws descriptive error for empty greedyFacesList', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeVoxelResult('empty');
+  assert.throws(() => VoxIO.exportFBX(result, {}), /empty|FBX/i);
+});
+
+// ---------- Unit 11: FBX ASCII export (PR #2) ----------
+
+function parseFBXArray(fbx, label) {
+  const re = new RegExp(label + ': \\*(\\d+) \\{ a: ([^}]*) \\}');
+  const m = fbx.match(re);
+  if (!m) return null;
+  const values = m[2].split(',').filter(Boolean).map(Number);
+  return { count: parseInt(m[1], 10), values };
+}
+
+// RED: task 3.1
+test('exportFBX throws descriptive error for empty greedyFacesList', () => {
+  const { VoxIO } = loadRuntime();
+  const result = makeVoxelResult('empty');
+  assert.throws(() => VoxIO.exportFBX(result, {}), /empty|FBX/i);
+});
+
+// RED: task 3.2
+test('exportFBX produces FBX 7.5 header and top-level sections', () => {
+  const { VoxIO } = loadRuntime();
+  const fbx = VoxIO.exportFBX(makeCubeResult(), {});
+  assert.match(fbx, /^; FBX 7\.5\.0 project project/m);
+  assert.match(fbx, /FBXHeaderExtension:/);
+  assert.match(fbx, /FBXVersion: 7500/);
+  assert.match(fbx, /GlobalSettings:/);
+  assert.match(fbx, /Documents:/);
+  assert.match(fbx, /References:/);
+  assert.match(fbx, /Definitions:/);
+  assert.match(fbx, /Objects:/);
+  assert.match(fbx, /Connections:/);
+});
+
+// RED: task 3.3
+test('exportFBX emits Model:Mesh, Geometry, and 36 PolygonVertexIndex entries', () => {
+  const { VoxIO } = loadRuntime();
+  const fbx = VoxIO.exportFBX(makeCubeResult(), {});
+  assert.match(fbx, /Model:\s*\d+, "Model::Mesh", "Mesh"/);
+  assert.match(fbx, /Geometry:\s*\d+, "Geometry::Mesh", "Mesh"/);
+  assert.match(fbx, /C: "OO",\d+,\d+/);
+  const pvi = parseFBXArray(fbx, 'PolygonVertexIndex');
+  assert.ok(pvi, 'PolygonVertexIndex array must exist');
+  assert.equal(pvi.values.length, 36, 'cube has 12 triangle polygons');
+  for (let i = 2; i < pvi.values.length; i += 3) {
+    assert.ok(pvi.values[i] < 0, `polygon ${i / 3} end marker must be negative, got ${pvi.values[i]}`);
+  }
+});
+
+// RED: task 3.4
+test('exportFBX declares Y-up GlobalSettings and applies opts.scale', () => {
+  const { VoxIO } = loadRuntime();
+  const fbx = VoxIO.exportFBX(makeCubeResult(), { scale: 2.5 });
+  assert.match(fbx, /P: "UpAxis", "int", "Integer", "",1/);
+  const verts = parseFBXArray(fbx, 'Vertices');
+  assert.ok(verts, 'Vertices array must exist');
+  assert.ok(verts.values.includes(-1.25), 'scaled min must be -1.25');
+  assert.ok(verts.values.includes(1.25), 'scaled max must be 1.25');
+});
+
+// RED: task 3.5
+test('exportFBX maps metallic, roughness and emissive material properties', () => {
+  const { VoxIO } = loadRuntime();
+  const fbx = VoxIO.exportFBX(makeCubeResult({
+    palette: [[255, 128, 0]],
+    surfaceMaterials: [{ metallic: 0.8, roughness: 0.3, emissive: 0.5 }],
+  }), {});
+  assert.match(fbx, /Material:\s*\d+, "Material::color_0", ""/);
+  assert.match(fbx, /P: "Metallic", "double", "Number", "",0\.800000/);
+  assert.match(fbx, /P: "Roughness", "double", "Number", "",0\.300000/);
+  assert.match(fbx, /P: "EmissiveColor", "Color", "", "E",0\.500000,0\.250980,0\.000000/);
+});
+
+// RED: task 3.7
+test('exportFBX rejects outputs that exceed the memory budget', () => {
+  const { VoxIO } = loadRuntime();
+  assert.throws(() => {
+    VoxIO.exportFBX(makeManyFacesResult(100000), {});
+  }, error => error.code === 'FBX_EXPORT_BUDGET_EXCEEDED');
+});
+
+// RED: task 3.8 — PBR material index alignment after palette remap
+test('exportFBX uses remapped palette material indices after applyRemap', () => {
+  const { VoxIO } = loadRuntime();
+  const PaletteIO = loadPaletteIORuntime();
+  const result = {
+    grid: new Int16Array([0, 1]),
+    dims: [2, 1, 1],
+    voxels: 2,
+    palette: [[255, 0, 0], [0, 255, 0]],
+    surfaceMaterials: [
+      { metallic: 0.8, roughness: 0.3, emissive: 0.5 },
+      { metallic: 0, roughness: 0, emissive: 0 },
+    ],
+    greedyFacesList: [
+      { color: 0, normal: [0, 0, 1], corners: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], ao: [1, 1, 1, 1] },
+      { color: 1, normal: [0, 0, 1], corners: [[1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]], ao: [1, 1, 1, 1] },
+    ],
+    naiveFacesList: [],
+    metrics: {},
+    diagnostics: { warnings: [], views: [] },
+  };
+  const editedPalette = [[0, 255, 0], [255, 0, 0]];
+  const remapped = PaletteIO.applyRemap(result, editedPalette, [1, 0]);
+  assert.equal(remapped.greedyFacesList[0].color, 1, 'first face remapped to index 1');
+  assert.equal(remapped.greedyFacesList[1].color, 0, 'second face remapped to index 0');
+  assert.equal(remapped.surfaceMaterials[1].metallic, 0.8, 'remapped surfaceMaterials[1] carries original PBR');
+  const fbx = VoxIO.exportFBX(remapped, {});
+  const materialBlocks = fbx.split('    Material: ').slice(1);
+  assert.equal(materialBlocks.length, 2);
+  const color0Block = materialBlocks[0];
+  const color1Block = materialBlocks[1];
+  assert.match(color0Block, /"Material::color_0"/);
+  assert.match(color1Block, /"Material::color_1"/);
+  assert.match(color0Block, /P: "Metallic", "double", "Number", "",0\.000000/);
+  assert.match(color1Block, /P: "Metallic", "double", "Number", "",0\.800000/);
+  const materials = parseFBXArray(fbx, 'Materials');
+  assert.ok(materials, 'LayerElementMaterial Materials array must exist');
+  assert.deepEqual(materials.values, [1, 1, 0, 0], 'first face polygons use remapped material 1, second face use material 0');
+});
+
+// ---------- Unit 12: export-formats UI toggles and app wiring (PR #3) ----------
+
+// RED: task 4.1
+test('fmtGlb and fmtFbx format toggles are present and wired', () => {
+  const win = loadAppRuntime();
+  const fmtGlb = win.document.getElementById('fmtGlb');
+  const fmtFbx = win.document.getElementById('fmtFbx');
+  assert.ok(fmtGlb, 'fmtGlb toggle must exist');
+  assert.ok(fmtFbx, 'fmtFbx toggle must exist');
+  assert.ok(fmtGlb.classList.contains('on'), 'fmtGlb must default to on');
+  assert.ok(fmtFbx.classList.contains('on'), 'fmtFbx must default to on');
+  fmtGlb.dispatchEvent({ type: 'click' });
+  assert.ok(!fmtGlb.classList.contains('on'), 'fmtGlb must toggle off');
+  fmtFbx.dispatchEvent({ type: 'click' });
+  assert.ok(!fmtFbx.classList.contains('on'), 'fmtFbx must toggle off');
+  fmtGlb.dispatchEvent({ type: 'click' });
+  fmtFbx.dispatchEvent({ type: 'click' });
+  assert.ok(fmtGlb.classList.contains('on'), 'fmtGlb must toggle back on');
+  assert.ok(fmtFbx.classList.contains('on'), 'fmtFbx must toggle back on');
+});
+
+// RED: task 4.3
+test('collectResultFiles includes glb and fbx when requested', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeCubeResult();
+  const files = dbg.collectResultFiles('hero', result, false, false, true, true);
+  const names = files.map(file => file.name);
+  assert.ok(names.includes('hero.glb'), 'must include hero.glb');
+  assert.ok(names.includes('hero.fbx'), 'must include hero.fbx');
+  assert.ok(!names.includes('hero.obj'), 'must not include hero.obj');
+  assert.ok(!names.includes('hero.vox'), 'must not include hero.vox');
+  assert.ok(!names.includes('hero.mtl'), 'must not include hero.mtl');
+});
+
+// RED: task 4.3 triangulation (obj/vox still work)
+test('collectResultFiles keeps obj and vox when requested without glb/fbx', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeCubeResult();
+  const files = dbg.collectResultFiles('hero', result, true, true, false, false);
+  const names = files.map(file => file.name);
+  assert.ok(names.includes('hero.obj'));
+  assert.ok(names.includes('hero.mtl'));
+  assert.ok(names.includes('hero.vox'));
+  assert.ok(!names.includes('hero.glb'));
+  assert.ok(!names.includes('hero.fbx'));
+});
+
+// RED: task 4.3 triangulation (glb/fbx off)
+test('collectResultFiles excludes glb and fbx when not requested', () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const result = makeCubeResult();
+  const files = dbg.collectResultFiles('hero', result, true, true, false, false);
+  const names = files.map(file => file.name);
+  assert.ok(!names.includes('hero.glb'));
+  assert.ok(!names.includes('hero.fbx'));
+});
+
+// RED: task 4.4
+test('exportBatch includes glb and fbx when toggles are on', async () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  dbg.addItem('hero.png', canvas, 'done', false);
+  dbg.state.last = makeCubeResult();
+  const fmtGlb = win.document.getElementById('fmtGlb');
+  const fmtFbx = win.document.getElementById('fmtFbx');
+  if (!fmtGlb.classList.contains('on')) fmtGlb.dispatchEvent({ type: 'click' });
+  if (!fmtFbx.classList.contains('on')) fmtFbx.dispatchEvent({ type: 'click' });
+  const fmtObj = win.document.getElementById('fmtObj');
+  const fmtVox = win.document.getElementById('fmtVox');
+  if (fmtObj.classList.contains('on')) fmtObj.dispatchEvent({ type: 'click' });
+  if (fmtVox.classList.contains('on')) fmtVox.dispatchEvent({ type: 'click' });
+  await dbg.exportBatch();
+  assert.ok(dbg.downloadHistory.length > 0, 'batch must trigger a download');
+  const lastDownload = dbg.downloadHistory[dbg.downloadHistory.length - 1];
+  assert.ok(lastDownload.name.endsWith('.zip'), 'batch must download a zip');
+  const entries = readZipEntries(lastDownload.bytes);
+  assert.ok(entries.includes('hero.glb'), 'zip must contain hero.glb');
+  assert.ok(entries.includes('hero.fbx'), 'zip must contain hero.fbx');
+  assert.ok(!entries.includes('hero.obj'), 'zip must not contain hero.obj');
+  assert.ok(!entries.includes('hero.vox'), 'zip must not contain hero.vox');
+});
+
+// RED: task 4.4 triangulation (all formats)
+test('exportBatch includes all enabled formats', async () => {
+  const win = loadAppRuntime();
+  const dbg = win.__dbg;
+  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
+  dbg.addItem('hero.png', canvas, 'done', false);
+  dbg.state.last = makeCubeResult();
+  const fmtGlb = win.document.getElementById('fmtGlb');
+  const fmtFbx = win.document.getElementById('fmtFbx');
+  const fmtObj = win.document.getElementById('fmtObj');
+  const fmtVox = win.document.getElementById('fmtVox');
+  if (!fmtGlb.classList.contains('on')) fmtGlb.dispatchEvent({ type: 'click' });
+  if (!fmtFbx.classList.contains('on')) fmtFbx.dispatchEvent({ type: 'click' });
+  if (!fmtObj.classList.contains('on')) fmtObj.dispatchEvent({ type: 'click' });
+  if (!fmtVox.classList.contains('on')) fmtVox.dispatchEvent({ type: 'click' });
+  await dbg.exportBatch();
+  const lastDownload = dbg.downloadHistory[dbg.downloadHistory.length - 1];
+  const entries = readZipEntries(lastDownload.bytes);
+  assert.ok(entries.includes('hero.glb'));
+  assert.ok(entries.includes('hero.fbx'));
+  assert.ok(entries.includes('hero.obj'));
+  assert.ok(entries.includes('hero.mtl'));
+  assert.ok(entries.includes('hero.vox'));
+});
+
+// ---------- Unit 13: LOD generation (PR #1) ----------
+
+function fillGrid(dims, fn) {
+  const [w, h, d] = dims;
+  const grid = new Int16Array(w * h * d);
+  for (let z = 0; z < d; z++) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        grid[x + w * (y + h * z)] = fn(x, y, z);
+      }
+    }
+  }
+  return grid;
+}
+
+function assertManifold(faces, label) {
+  const edges = new Map();
+  for (const face of faces) {
+    const c = face.corners;
+    for (let i = 0; i < 4; i++) {
+      const a = c[i].join(',');
+      const b = c[(i + 1) % 4].join(',');
+      const key = a < b ? `${a}--${b}` : `${b}--${a}`;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  for (const [key, count] of edges) {
+    assert.equal(count, 2, `${label}: edge ${key} must be shared by exactly two faces, got ${count}`);
+  }
+}
+
+// RED: task 1.1
+test('downsampleGrid selects dominant color with first-found tie-breaker', () => {
+  const { Voxel } = loadRuntime();
+  const dominant = new Int16Array([0, 0, 0, 0, 0, 1, 1, 1]);
+  const out = Voxel.downsampleGrid(dominant, [2, 2, 2], 2);
+  assert.deepEqual(Array.from(out.dims), [1, 1, 1]);
+  assert.equal(out.grid[0], 0);
+
+  const tie = new Int16Array([0, 1, 0, 1, 1, 0, 1, 0]);
+  const tieOut = Voxel.downsampleGrid(tie, [2, 2, 2], 2);
+  assert.equal(tieOut.grid[0], 0, 'first-found color wins ties');
+});
+
+// RED: task 1.1 triangulation (4x4x4 two-color slab)
+test('downsampleGrid produces expected 2x2x2 grid from two-color 4x4x4 slab', () => {
+  const { Voxel } = loadRuntime();
+  const grid = fillGrid([4, 4, 4], (x, y, z) => (z < 2 ? 0 : 1));
+  const out = Voxel.downsampleGrid(grid, [4, 4, 4], 2);
+  assert.deepEqual(Array.from(out.dims), [2, 2, 2]);
+  for (let z = 0; z < 2; z++) {
+    for (let y = 0; y < 2; y++) {
+      for (let x = 0; x < 2; x++) {
+        assert.equal(out.grid[x + 2 * (y + 2 * z)], z === 0 ? 0 : 1, `cell ${x},${y},${z}`);
+      }
+    }
+  }
+});
+
+// RED: task 1.2 / 1.3
+test('extractMesh builds lodFaces with strict budget ordering', () => {
+  const { Voxel } = loadRuntime();
+  const pixels = makePixels(4, 4, (x, y) => [x * 17, y * 17, 128, 255]);
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 4;
+  const result = Voxel.voxelize(pixels, config, {});
+  assert.ok(result.lodFaces);
+  assert.ok(Array.isArray(result.lodFaces.high));
+  assert.ok(Array.isArray(result.lodFaces.medium));
+  assert.ok(Array.isArray(result.lodFaces.low));
+  assert.ok(result.lodFaces.low.length < result.lodFaces.medium.length, `low ${result.lodFaces.low.length} < medium ${result.lodFaces.medium.length}`);
+  assert.ok(result.lodFaces.medium.length < result.lodFaces.high.length, `medium ${result.lodFaces.medium.length} < high ${result.lodFaces.high.length}`);
+});
+
+// RED: task 1.4
+test('every LOD face list is a closed manifold', () => {
+  const { Voxel } = loadRuntime();
+  const pixels = makePixels(4, 4, (x, y) => [x * 17, y * 17, 128, 255]);
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 4;
+  const result = Voxel.voxelize(pixels, config, {});
+  assertManifold(result.lodFaces.high, 'high');
+  assertManifold(result.lodFaces.medium, 'medium');
+  assertManifold(result.lodFaces.low, 'low');
+});
+
+// RED: task 1.2 default behavior
+test('default LOD is high and greedyFacesList matches lodFaces.high', () => {
+  const { Voxel } = loadRuntime();
+  const pixels = makePixels(4, 4, () => [200, 120, 80, 255]);
+  const result = Voxel.voxelize(pixels, Voxel.createDefaultConfig(), {});
+  assert.equal(result.selectedLod, 'high');
+  assert.equal(result.greedyFacesList.length, result.lodFaces.high.length);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.greedyFacesList)), JSON.parse(JSON.stringify(result.lodFaces.high)));
+});
+
+// RED: task 1.2 level selection
+test('mesh.lod medium selects medium LOD and keeps high as default list', () => {
+  const { Voxel } = loadRuntime();
+  const pixels = makePixels(4, 4, (x, y) => [x * 17, y * 17, 128, 255]);
+  const config = Voxel.createDefaultConfig();
+  config.depth.layers = 4;
+  config.mesh.lod = 'medium';
+  const result = Voxel.voxelize(pixels, config, {});
+  assert.equal(result.selectedLod, 'medium');
+  assert.ok(result.lodFaces.medium.length < result.lodFaces.high.length);
 });

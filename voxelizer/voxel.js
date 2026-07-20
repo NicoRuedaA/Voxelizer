@@ -31,12 +31,17 @@ const RECONSTRUCTION_MODES = ['strict', 'weighted'];
 const DEPTH_VOLUME_MODES = ['symmetric', 'asymmetric', 'depthmap'];
 const DEPTH_PROFILE_MODES = ['uniform', 'dt', 'poisson', 'sfs', 'combo', 'humanoid'];
 const MESH_MODES = ['voxel'];
+const LOD_LEVELS = ['high', 'medium', 'low'];
 const COLOR_MODES = ['front', 'auxiliary'];
 const SURFACE_COLOR_MODES = ['front', 'auxiliary', 'darken'];
-const BACK_COLOR_MODES = ['front', 'darken'];
+const BACK_COLOR_MODES = ['front', 'darken', 'auxiliary'];
 const CANONICAL_ORIENTATIONS = {
-  side: { projection: 'orthographic', horizontal: '+Z', vertical: '-Y' },
+  front: { projection: 'orthographic', horizontal: '+X', vertical: '-Y' },
+  back: { projection: 'orthographic', horizontal: '-X', vertical: '-Y' },
+  left: { projection: 'orthographic', horizontal: '-Z', vertical: '-Y' },
+  right: { projection: 'orthographic', horizontal: '+Z', vertical: '-Y' },
   top: { projection: 'orthographic', horizontal: '+X', vertical: '+Z' },
+  side: { projection: 'orthographic', horizontal: '+Z', vertical: '-Y' },
   depthmap: { projection: 'orthographic', horizontal: '+X', vertical: '-Y' },
 };
 
@@ -100,12 +105,17 @@ const DEFAULT_CONFIG = {
     scale: 1,
     ao: false,
     aoStrength: 0.8,
+    lod: 'high',
   },
   color: {
     mode: 'front',
     side: 'front',
     back: 'front',
     darken: 0.72,
+  },
+  inference: {
+    enabled: false,
+    back: true,
   },
 };
 
@@ -147,7 +157,7 @@ function _coerceBool(value, fallback) {
 function _configShape(input) {
   if (!_isObject(input)) return {};
   const out = {};
-  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'material', 'depth', 'mesh', 'color'];
+  const keys = ['version', 'palette', 'input', 'silhouette', 'alignment', 'reconstruction', 'material', 'depth', 'mesh', 'color', 'inference'];
   for (const key of keys) {
     const value = input[key];
     if (key === 'version') {
@@ -168,6 +178,7 @@ function _legacyPatch(input) {
   if ('scale' in input) patch.mesh = { ...(patch.mesh || {}), scale: input.scale };
   if ('ao' in input) patch.mesh = { ...(patch.mesh || {}), ao: input.ao };
   if ('aoStrength' in input) patch.mesh = { ...(patch.mesh || {}), aoStrength: input.aoStrength };
+  if ('lod' in input) patch.mesh = { ...(patch.mesh || {}), lod: input.lod };
   if ('depth' in input && !_isObject(input.depth)) patch.depth = { ...(patch.depth || {}), layers: input.depth };
   if ('depthMode' in input) patch.depth = { ...(patch.depth || {}), profile: input.depthMode };
   if ('relief' in input) patch.depth = { ...(patch.depth || {}), relief: input.relief };
@@ -204,6 +215,7 @@ function _legacyPatch(input) {
   if ('sideColorMode' in input) patch.color = { ...(patch.color || {}), side: input.sideColorMode };
   if ('backColorMode' in input) patch.color = { ...(patch.color || {}), back: input.backColorMode };
   if ('colorDarken' in input) patch.color = { ...(patch.color || {}), darken: input.colorDarken };
+  if ('inferenceEnabled' in input) patch.inference = { ...(patch.inference || {}), enabled: input.inferenceEnabled };
   return patch;
 }
 function _normalizeViewTransform(input) {
@@ -301,12 +313,17 @@ function normalizeConfig(input) {
       scale: _clampNumber(merged.mesh && merged.mesh.scale, 0.1, 16, DEFAULT_CONFIG.mesh.scale),
       ao: _coerceBool(merged.mesh && merged.mesh.ao, DEFAULT_CONFIG.mesh.ao),
       aoStrength: _clampNumber(merged.mesh && merged.mesh.aoStrength, 0, 1, DEFAULT_CONFIG.mesh.aoStrength),
+      lod: _pickEnum(merged.mesh && merged.mesh.lod, LOD_LEVELS, DEFAULT_CONFIG.mesh.lod),
     },
     color: {
       mode: _pickEnum(merged.color && merged.color.mode, COLOR_MODES, DEFAULT_CONFIG.color.mode),
       side: _pickEnum(merged.color && merged.color.side, SURFACE_COLOR_MODES, DEFAULT_CONFIG.color.side),
       back: _pickEnum(merged.color && merged.color.back, BACK_COLOR_MODES, DEFAULT_CONFIG.color.back),
       darken: _clampNumber(merged.color && merged.color.darken, 0.1, 1, DEFAULT_CONFIG.color.darken),
+    },
+    inference: {
+      enabled: _coerceBool(merged.inference && merged.inference.enabled, DEFAULT_CONFIG.inference.enabled),
+      back: _coerceBool(merged.inference && merged.inference.back, DEFAULT_CONFIG.inference.back),
     },
   };
   return normalized;
@@ -328,6 +345,7 @@ function legacyOptionsFromConfig(input) {
     comboMix: config.depth.comboMix,
     ao: config.mesh.ao,
     aoStrength: config.mesh.aoStrength,
+    lod: config.mesh.lod,
     humTorso: config.depth.humTorso,
     humRound: config.depth.humRound,
     humPrior: config.depth.humPrior,
@@ -357,10 +375,29 @@ function legacyOptionsFromConfig(input) {
     sideColorMode: config.color.side,
     backColorMode: config.color.back,
     colorDarken: config.color.darken,
+    inferenceEnabled: config.inference.enabled,
   };
 }
 function defaultLegacyOptions() {
   return legacyOptionsFromConfig(DEFAULT_CONFIG);
+}
+function inferViews(frontPixels, config) {
+  const normalized = normalizeConfig(config);
+  if (!normalized.inference.enabled || !normalized.inference.back) return null;
+  const source = validatePixels(frontPixels, 'front');
+  const { w, h, data } = source;
+  const mirrored = new data.constructor(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const src = (w - 1 - x + w * y) * 4;
+      const dst = (x + w * y) * 4;
+      mirrored[dst] = data[src];
+      mirrored[dst + 1] = data[src + 1];
+      mirrored[dst + 2] = data[src + 2];
+      mirrored[dst + 3] = data[src + 3];
+    }
+  }
+  return { role: 'back', pixels: { w, h, data: mirrored } };
 }
 function _measureStage(stageMs, name, fn) {
   const start = _nowMs();
@@ -1143,7 +1180,8 @@ function normalizeViewInputs(views, config) {
       try { pixels = validatePixels(selectedPixels, `views[${index}]`); }
       catch (error) { issues.push({ code: error.code || 'INVALID_VIEW_PIXELS', message: error.message }); }
     }
-    const configured = (role === 'side' || role === 'top') ? config.alignment[role] : {};
+    const configured = (role === 'left' || role === 'right' || role === 'side') ? config.alignment.side
+      : (role === 'top' ? config.alignment.top : {});
     const canonical = CANONICAL_ORIENTATIONS[role] || null;
     const orientation = descriptor.orientation == null ? canonical : descriptor.orientation;
     if (!canonical) issues.push({ code: 'UNSUPPORTED_VIEW_ROLE', message: `View role "${role || '(missing)'}" has no calibrated projector.` });
@@ -1177,8 +1215,10 @@ function _assertTransformedViewBudgets(inputs, dims, materialEnabled) {
   const [W, H, D] = dims;
   let transformedCells = 0, sourceCells = 0;
   for (const input of inputs) {
-    if (!input.valid || !input.pixels || (input.role !== 'side' && input.role !== 'top')) continue;
-    transformedCells += input.role === 'side' ? D * H : W * D;
+    const isLateral = input.role === 'side' || input.role === 'left' || input.role === 'right';
+    const isTop = input.role === 'top';
+    if (!input.valid || !input.pixels || (!isLateral && !isTop && input.role !== 'back')) continue;
+    transformedCells += isLateral ? D * H : (isTop ? W * D : W * H);
     sourceCells += input.pixels.w * input.pixels.h;
   }
   // Includes resampled mask/confidence/RGB, inverse/EDT/edge distance,
@@ -1201,7 +1241,7 @@ function _assertAuxiliaryBudgets(inputs, silhouette) {
     const count = input.pixels.w * input.pixels.h;
     pixels += count;
     bytes += input.pixels.data.byteLength;
-    if (input.role === 'side' || input.role === 'top') {
+    if (input.role === 'side' || input.role === 'top' || input.role === 'back' || input.role === 'left' || input.role === 'right') {
       const work = _morphWork(input.pixels.w, input.pixels.h, silhouette);
       if (work > MAX_MORPH_WORK) throw _budgetError('AUX_MORPH_BUDGET_EXCEEDED', `View ${input.id} exceeds the ${MAX_MORPH_WORK}-operation morphology budget`);
       morphologyWork += work;
@@ -1224,8 +1264,11 @@ function prepareSilhouettes(config, views, dims) {
   const budget = _assertTransformedViewBudgets(transformed, dims, config.material.enabled);
   const prepared = [];
   for (const view of transformed) {
-    if (!view.valid || !view.pixels || (view.role !== 'side' && view.role !== 'top')) continue;
-    const dw = view.role === 'side' ? D : W, dh = view.role === 'side' ? H : D;
+    const isLateral = view.role === 'side' || view.role === 'left' || view.role === 'right';
+    const isTop = view.role === 'top';
+    if (!view.valid || !view.pixels || (!isLateral && !isTop && view.role !== 'back')) continue;
+    const dw = isLateral ? D : (isTop ? W : W);
+    const dh = isLateral ? H : (isTop ? D : H);
     const transform = _landmarkTransform(view, dw, dh);
     const meta = _prepareViewMask(view.pixels, alpha, dw, dh, transform, config.silhouette);
     const inverse = new Uint8Array(meta.mask.length);
@@ -1236,7 +1279,10 @@ function prepareSilhouettes(config, views, dims) {
     prepared.push({ ...view, transform, ...meta, edgeDistance, w: dw, h: dh });
   }
   const side = prepared.find(view => view.role === 'side') || null;
+  const left = prepared.find(view => view.role === 'left') || null;
+  const right = prepared.find(view => view.role === 'right') || null;
   const top = prepared.find(view => view.role === 'top') || null;
+  const back = prepared.find(view => view.role === 'back') || null;
   const byId = Object.create(null);
   for (const view of prepared) byId[view.id] = { id: view.id, role: view.role, w: view.w, h: view.h, mask: view.mask, bounds: view.bounds, sourceBounds: view.sourceBounds, transform: view.transform };
   return {
@@ -1250,7 +1296,10 @@ function prepareSilhouettes(config, views, dims) {
     previews: {
       byId,
       side: side ? byId[side.id] : null,
+      left: left ? byId[left.id] : null,
+      right: right ? byId[right.id] : null,
       top: top ? byId[top.id] : null,
+      back: back ? byId[back.id] : null,
     },
   };
 }
@@ -1289,10 +1338,14 @@ function _projectAxis(mask, w, h, direction) {
   return out;
 }
 function _viewSample(view, x, py, z) {
-  return view.role === 'side' ? z + view.w * py : x + view.w * z;
+  if (view.role === 'side' || view.role === 'right') return z + view.w * py;
+  if (view.role === 'left') return (view.w - 1 - z) + view.w * py;
+  if (view.role === 'top') return x + view.w * z;
+  return x + view.w * py;
 }
 function _viewWeight(view, config) {
-  const roleWeight = view.role === 'side' ? config.reconstruction.sideWeight : config.reconstruction.topWeight;
+  const roleWeight = (view.role === 'side' || view.role === 'left' || view.role === 'right') ? config.reconstruction.sideWeight
+    : (view.role === 'top' ? config.reconstruction.topWeight : config.reconstruction.frontWeight);
   return roleWeight * view.confidence;
 }
 function _viewConfidenceAt(view, sample, edgeTolerance) {
@@ -1415,7 +1468,7 @@ function _refreshMaterialEvidenceBytes(state) {
 }
 function _materialEvidenceWorstCaseBytes(quant, silhouettes) {
   const W = quant.w, H = quant.h, words = Math.ceil(MAX_MATERIAL_CLUSTERS / 32);
-  const hasSide = silhouettes.prepared.some(view => view.role === 'side');
+  const hasSide = silhouettes.prepared.some(view => view.role === 'side' || view.role === 'left' || view.role === 'right');
   const hasTop = silhouettes.prepared.some(view => view.role === 'top');
   let bytes = quant.idxAt.length * 3 + quant.palette.length + 192 + 256 + MAX_MATERIAL_CLUSTERS * 10;
   bytes += ((hasSide ? H : 0) + (hasTop ? W : 0)) * words * 4;
@@ -1470,7 +1523,7 @@ function prepareMaterialEvidence(quant, silhouettes, config) {
   };
   if (!effective || !silhouettes.prepared.length) return state;
   const W = quant.w, H = quant.h;
-  const hasSide = silhouettes.prepared.some(view => view.role === 'side');
+  const hasSide = silhouettes.prepared.some(view => view.role === 'side' || view.role === 'left' || view.role === 'right');
   const hasTop = silhouettes.prepared.some(view => view.role === 'top');
   const words = Math.ceil(MAX_MATERIAL_CLUSTERS / 32);
   const estimatedEvidenceBytes = _materialEvidenceWorstCaseBytes(quant, silhouettes);
@@ -1534,21 +1587,31 @@ function prepareMaterialEvidence(quant, silhouettes, config) {
           clustered.centers[vb], clustered.centers[vb + 1], clustered.centers[vb + 2]
         ) <= config.material.tolerance) entry.compatibility[fc * clustered.clusterCount + vc] = 1;
       }
-      const axisBits = view.role === 'side' ? rowBits : colBits;
-      for (let sample = 0; sample < view.mask.length; sample++) {
-        if (!view.mask[sample]) continue;
-        const x = sample % view.w, y = (sample / view.w) | 0;
-        const axis = view.role === 'side' ? y : x;
-        const vc = clustered.ids[sample];
-        let match = false;
-        for (let fc = 0; fc < front.clusterCount; fc++) {
-          if (!_axisHasCluster(axisBits, words, axis, fc)) continue;
-          if (entry.compatibility[fc * clustered.clusterCount + vc]) {
-            entry.supportedFront[fc] = 1;
-            supported[fc] = 1;
-            match = true;
+        const isLateral = view.role === 'side' || view.role === 'left' || view.role === 'right';
+        const axisBits = isLateral ? rowBits : colBits;
+        for (let sample = 0; sample < view.mask.length; sample++) {
+          if (!view.mask[sample]) continue;
+          const vc = clustered.ids[sample];
+          let match = false;
+          if (view.role === 'back') {
+            const fc = front.clusterAt[sample];
+            if (fc !== NO_MATERIAL && fc < front.clusterCount && entry.compatibility[fc * clustered.clusterCount + vc]) {
+              entry.supportedFront[fc] = 1;
+              supported[fc] = 1;
+              match = true;
+            }
+          } else {
+            const x = sample % view.w, y = (sample / view.w) | 0;
+            const axis = isLateral ? y : x;
+            for (let fc = 0; fc < front.clusterCount; fc++) {
+              if (!_axisHasCluster(axisBits, words, axis, fc)) continue;
+              if (entry.compatibility[fc * clustered.clusterCount + vc]) {
+                entry.supportedFront[fc] = 1;
+                supported[fc] = 1;
+                match = true;
+              }
+            }
           }
-        }
         entry.overlay[sample] = match ? 1 : 2;
         if (match) entry.compatiblePixels++; else entry.mismatchPixels++;
       }
@@ -1750,11 +1813,12 @@ function _isExposed(grid, dims, x, y, z, dx, dy, dz) {
 function fuseVoxelColors(occupancy, quant, silhouettes, config) {
   const sourceGrid = occupancy.grid, dims = occupancy.dims;
   const material = occupancy.material;
-  const sideViews = silhouettes.prepared.filter(view => view.role === 'side');
+  const sideViews = silhouettes.prepared.filter(view => view.role === 'side' || view.role === 'left' || view.role === 'right');
   const topViews = silhouettes.prepared.filter(view => view.role === 'top');
-  const usableAuxiliary = sideViews.concat(topViews).some(view => view.confidence > 0 && !!view.bounds);
-  const effectiveSide = config.color.mode === 'auxiliary' && usableAuxiliary ? 'auxiliary' : config.color.side;
-  const effectiveBack = config.color.back;
+  const backViews = silhouettes.prepared.filter(view => view.role === 'back');
+  const usableAuxiliary = sideViews.concat(topViews).concat(backViews).some(view => view.confidence > 0 && !!view.bounds);
+  const effectiveSide = config.color.mode === 'auxiliary' && sideViews.concat(topViews).some(view => view.confidence > 0 && !!view.bounds) ? 'auxiliary' : config.color.side;
+  const effectiveBack = config.color.back === 'auxiliary' && backViews.some(view => view.confidence > 0 && !!view.bounds) ? 'auxiliary' : config.color.back;
   const [W, H, D] = dims;
   const frontmostZ = new Int16Array(W * H).fill(-1);
   for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -1790,9 +1854,10 @@ function fuseVoxelColors(occupancy, quant, silhouettes, config) {
     return nearest;
   };
   const darken = rgb => rgb.map(value => Math.round(value * config.color.darken));
-  const auxiliaryColor = (views, sample) => {
+  const auxiliaryColor = (views, sampleFn) => {
     let total = 0, r = 0, g = 0, b = 0;
     for (const view of views) {
+      const sample = sampleFn(view);
       const weight = _viewWeight(view, config) * view.confidenceMap[sample];
       if (weight <= 0) continue;
       total += weight;
@@ -1812,12 +1877,19 @@ function fuseVoxelColors(occupancy, quant, silhouettes, config) {
       }
       return base;
     }
-    if (dir === 5) return effectiveBack === 'darken' ? darken(base) : base;
+    if (dir === 5) {
+      if (effectiveBack === 'auxiliary') {
+        const py = H - 1 - y;
+        const auxiliary = auxiliaryColor(backViews, view => _viewSample(view, x, py, z));
+        if (auxiliary) return auxiliary;
+      }
+      return effectiveBack === 'darken' ? darken(base) : base;
+    }
     const py = H - 1 - y;
     if (effectiveSide === 'auxiliary') {
       const auxiliary = dir <= 1
-        ? auxiliaryColor(sideViews, z + D * py)
-        : auxiliaryColor(topViews, x + W * z);
+        ? auxiliaryColor(sideViews, view => _viewSample(view, x, py, z))
+        : auxiliaryColor(topViews, view => _viewSample(view, x, py, z));
       if (auxiliary) return auxiliary;
     }
     return effectiveSide === 'darken' ? darken(base) : base;
@@ -1916,7 +1988,8 @@ function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, 
   const frontCols = _projectAxis(frontMask, quant.w, quant.h, 'col');
   for (const view of silhouettes.prepared) {
     const sourceInput = allViews.find(input => input && input.id === view.id);
-    const profileResolution = view.role === 'side'
+    const isLateral = view.role === 'side' || view.role === 'left' || view.role === 'right';
+    const profileResolution = isLateral
       ? _profileResolution(sourceInput && sourceInput.pixels && sourceInput.pixels.w, dims[2]) : null;
     const materialView = _materialViewEntry(material, view);
     const projected = new Uint8Array(view.w * view.h);
@@ -1926,8 +1999,8 @@ function buildDiagnostics(quant, grid, dims, silhouettes, depthState, allViews, 
       projected[_viewSample(view, x, py, z)] = 1;
     }
     const quality = _iou(view.mask, projected), overlay = new Uint8Array(projected.length);
-    const inputAxis = view.role === 'side' ? _projectAxis(view.mask, view.w, view.h, 'row') : _projectAxis(view.mask, view.w, view.h, 'col');
-    const frontAxis = view.role === 'side' ? frontRows : frontCols;
+    const inputAxis = isLateral ? _projectAxis(view.mask, view.w, view.h, 'row') : _projectAxis(view.mask, view.w, view.h, 'col');
+    const frontAxis = isLateral ? frontRows : frontCols;
     const inputOverlap = _iou(frontAxis, inputAxis).iou;
     for (let i = 0; i < overlay.length; i++) overlay[i] = view.mask[i] ? (projected[i] ? 1 : 2) : (projected[i] ? 3 : 0);
     const empty = !_maskBounds(view.mask, view.w, view.h);
@@ -2047,19 +2120,81 @@ function _assertFaceBudget(exposedFaces, greedy) {
   }
   return estimatedBytes;
 }
+function downsampleGrid(grid, dims, factor) {
+  const [w, h, d] = dims;
+  const f = Math.max(1, factor | 0);
+  const ow = Math.ceil(w / f);
+  const oh = Math.ceil(h / f);
+  const od = Math.ceil(d / f);
+  const out = new Int16Array(ow * oh * od);
+  const counts = new Map();
+  for (let oz = 0; oz < od; oz++) {
+    const z0 = oz * f;
+    const z1 = Math.min(z0 + f, d);
+    for (let oy = 0; oy < oh; oy++) {
+      const y0 = oy * f;
+      const y1 = Math.min(y0 + f, h);
+      for (let ox = 0; ox < ow; ox++) {
+        const x0 = ox * f;
+        const x1 = Math.min(x0 + f, w);
+        counts.clear();
+        for (let z = z0; z < z1; z++) {
+          for (let y = y0; y < y1; y++) {
+            for (let x = x0; x < x1; x++) {
+              const c = grid[x + w * (y + h * z)];
+              if (c < 0) continue;
+              counts.set(c, (counts.get(c) || 0) + 1);
+            }
+          }
+        }
+        let winner = -1;
+        let winnerCount = 0;
+        for (const count of counts.values()) {
+          if (count > winnerCount) winnerCount = count;
+        }
+        for (const [color, count] of counts) {
+          if (count === winnerCount) { winner = color; break; }
+        }
+        out[ox + ow * (oy + oh * oz)] = winner;
+      }
+    }
+  }
+  return { grid: out, dims: [ow, oh, od] };
+}
 function extractMesh(grid, dims, config, colorAtFace, exposedFaceCount) {
   const opts = legacyOptionsFromConfig(config);
   const naiveCount = exposedFaceCount == null ? _countExposedFaces(grid, dims) : exposedFaceCount;
   _assertFaceBudget(naiveCount, opts.greedy);
-  const greedy = greedyFaces(grid, dims, colorAtFace);
+  const high = greedyFaces(grid, dims, colorAtFace);
+  const mediumGrid = downsampleGrid(grid, dims, 2);
+  const medium = greedyFaces(mediumGrid.grid, mediumGrid.dims);
+  const lowGrid = downsampleGrid(grid, dims, 4);
+  const low = greedyFaces(lowGrid.grid, lowGrid.dims);
+  const selectedLod = (config && config.mesh && config.mesh.lod) || 'high';
   return {
-    greedyFacesList: greedy,
+    greedyFacesList: high,
     naiveFacesList: opts.greedy ? null : naiveFaces(grid, dims, colorAtFace),
     naiveCount,
+    lodFaces: { high, medium, low },
+    selectedLod,
   };
 }
 
 // ---- top-level: pixels + opts -> everything app.js needs ----
+function _hasRealBack(views) {
+  if (!views) return false;
+  if (Array.isArray(views.views)) return views.views.some(view => view && view.role === 'back');
+  return false;
+}
+function _mergeInferredViews(frontPixels, views, config) {
+  if (!config.inference.enabled || !config.inference.back) return views;
+  if (_hasRealBack(views)) return views;
+  const inferred = inferViews(frontPixels, config);
+  if (!inferred) return views;
+  const base = views || {};
+  const mergedViews = Array.isArray(base.views) ? [...base.views, inferred] : [inferred];
+  return { ...base, views: mergedViews };
+}
 function voxelize(pixels, opts, views) {
   const stageMs = {};
   const totalStart = _nowMs();
@@ -2072,7 +2207,8 @@ function voxelize(pixels, opts, views) {
   });
   const frontPixels = _measureStage(stageMs, 'preprocessFront', () => preprocessPixels(validatedFront, config.silhouette));
   const quant = _measureStage(stageMs, 'prepareFront', () => quantize(frontPixels, config.silhouette.alphaThreshold, config.palette.colors));
-  const viewInputs = _measureStage(stageMs, 'normalizeViews', () => normalizeViewInputs(views, config));
+  const mergedViews = _measureStage(stageMs, 'mergeInferredViews', () => _mergeInferredViews(frontPixels, views, config));
+  const viewInputs = _measureStage(stageMs, 'normalizeViews', () => normalizeViewInputs(mergedViews, config));
   _measureStage(stageMs, 'validateViewBudgets', () => _assertAuxiliaryBudgets(viewInputs, config.silhouette));
   const depthState = _measureStage(stageMs, 'prepareDepth', () => createDepthState(quant, config, viewInputs));
   const silhouettes = _measureStage(stageMs, 'prepareSilhouettes', () => prepareSilhouettes(config, { views: viewInputs }, [quant.w, quant.h, depthState.layers]));
@@ -2108,7 +2244,11 @@ function voxelize(pixels, opts, views) {
       preview.material = view.material;
     }
   }
-  const faceEstimateBytes = mesh.greedyFacesList.length * 152 + (mesh.naiveFacesList ? mesh.naiveFacesList.length * 152 : 0);
+  const lodFaces = mesh.lodFaces || {};
+  const faceEstimateBytes = mesh.greedyFacesList.length * 152
+    + (mesh.naiveFacesList ? mesh.naiveFacesList.length * 152 : 0)
+    + (lodFaces.medium ? lodFaces.medium.length * 152 : 0)
+    + (lodFaces.low ? lodFaces.low.length * 152 : 0);
   const memoryEstimateBytes = _estimateMemoryBytes({
     frontPixels: frontPixels.data,
     quantIdxAt: quant.idxAt,
@@ -2126,12 +2266,15 @@ function voxelize(pixels, opts, views) {
     config,
     legacyOptions: legacyOptionsFromConfig(config),
     palette: colored.palette,
+    surfaceMaterials: colored.palette.map(() => ({ metallic: 0, roughness: 0, emissive: 0 })),
     voxelColorPolicy: colored.voxelColorPolicy,
     grid,
     dims, voxels,
     greedyFacesList: mesh.greedyFacesList,
     naiveFacesList: mesh.naiveFacesList,
     naiveCount: mesh.naiveCount,
+    lodFaces: mesh.lodFaces,
+    selectedLod: mesh.selectedLod,
     metrics: {
       stageMs,
       totalMs: _roundMs(_nowMs() - totalStart),
@@ -2199,6 +2342,8 @@ voxelRoot.Voxel = {
   CONFIG_VERSION,
   MAX_DEPTH_LAYERS,
   MAX_VOXEL_COUNT,
+  CANONICAL_ORIENTATIONS,
+  LOD_LEVELS,
   canvasToPixels,
   validatePixels,
   preprocessPixels,
@@ -2207,15 +2352,19 @@ voxelRoot.Voxel = {
   defaultLegacyOptions,
   legacyOptionsFromConfig,
   normalizeConfig,
+  inferViews,
   _maskBounds,
   prepareSilhouettes,
   transformViews,
   normalizeViewInputs,
   _landmarkTransform,
   _forwardTransformPoint,
+  _viewSample,
+  _viewWeight,
   createDepthState,
   calculateOccupancy,
   extractMesh,
+  downsampleGrid,
   voxelize,
   annotateAO,
 };

@@ -20,7 +20,8 @@
     depth: 6, alpha: 40, colors: 32, greedy: true, depthMode: 'uniform', relief: 1.0, scale: 1.0,
     inputCap: 96,
     dtRound: 1.0, poissonTension: 0.0, sfsGamma: 1.0, comboMix: 0.5, ao: false, aoStrength: 0.8,
-    humTorso: 0.6, humRound: 1.0, humPrior: 0.4, humHead: 0.25, humSmooth: 0.3
+    humTorso: 0.6, humRound: 1.0, humPrior: 0.4, humHead: 0.25, humSmooth: 0.3,
+    inferenceEnabled: false
   };
   const state = {
     pixels: null,        // current {w,h,data} (single frame, after sheet slice)
@@ -36,7 +37,11 @@
     batchCancelRequested: false,
     batchProgress: { visible: false, done: 0, total: 0, label: 'Listo' },
     diagnosticViewIds: {},
+    paletteEdit: null,
   };
+
+  // Download history used for testing / debugging batch and individual exports.
+  const downloadHistory = [];
 
   // ---------- three setup ----------
   const host = document.getElementById('three');
@@ -45,6 +50,11 @@
   host.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambientLight);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  directionalLight.position.set(50, 80, 60);
+  scene.add(directionalLight);
   const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000);
   const orthographicCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 1000);
   let modelWorldDims = [44, 44, 44];
@@ -142,8 +152,16 @@
 
   // ---------- build geometry from faces ----------
   function disposeModel() {
-    if (mesh) { modelGroup.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); mesh = null; }
-    if (wire) { modelGroup.remove(wire); wire.geometry.dispose(); wire.material.dispose(); wire = null; }
+    // Remove every mesh/wire child so the flat path and the PBR multi-mesh path
+    // both leave the modelGroup empty before rebuilding.
+    const children = modelGroup.children.slice();
+    for (const child of children) {
+      modelGroup.remove(child);
+      if (child.geometry && child.geometry.dispose) child.geometry.dispose();
+      if (child.material && child.material.dispose) child.material.dispose();
+    }
+    mesh = null;
+    wire = null;
   }
 
   function buildModel(result) {
@@ -151,37 +169,83 @@
 
     const faces = state.opts.greedy ? result.greedyFacesList : (result.naiveFacesList || result.greedyFacesList);
     const pal = result.palette;
-    if (state.opts.ao && result.grid) Voxel.annotateAO(faces, result.grid, result.dims, state.opts.aoStrength);
+    const surfaceMaterials = result.surfaceMaterials || pal.map(() => ({ metallic: 0, roughness: 0, emissive: 0 }));
+    const hasPBR = surfaceMaterials.some(m => m && (m.metallic > 0 || m.roughness > 0 || m.emissive > 0));
+    if (state.opts.ao && result.grid && !hasPBR) Voxel.annotateAO(faces, result.grid, result.dims, state.opts.aoStrength);
 
-    const pos = [], col = [], idx = [];
-    const wpos = [];
-    let vi = 0;
-    for (const f of faces) {
-      const c = f.corners, s = shade(f.normal);
-      const rgb = pal[f.color] || [200, 200, 200];
-      const r = (rgb[0] / 255) * s, g = (rgb[1] / 255) * s, b = (rgb[2] / 255) * s;
-      const ao = f.ao;
-      for (let k = 0; k < 4; k++) {
-        const a = ao ? ao[k] : 1;
-        pos.push(c[k][0], c[k][1], c[k][2]); col.push(r * a, g * a, b * a);
+    const [DX, DY, DZ] = result.dims;
+
+    if (!hasPBR) {
+      // Flat path: one mesh, one material, vertex colors + fake shading.
+      const pos = [], col = [], idx = [];
+      let vi = 0;
+      for (const f of faces) {
+        const c = f.corners, s = shade(f.normal);
+        const rgb = pal[f.color] || [200, 200, 200];
+        const r = (rgb[0] / 255) * s, g = (rgb[1] / 255) * s, b = (rgb[2] / 255) * s;
+        const ao = f.ao;
+        for (let k = 0; k < 4; k++) {
+          const a = ao ? ao[k] : 1;
+          pos.push(c[k][0], c[k][1], c[k][2]); col.push(r * a, g * a, b * a);
+        }
+        idx.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
+        vi += 4;
       }
-      idx.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
-      // wire edges (4 sides of quad)
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      geo.setIndex(idx);
+      const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+      mesh = new THREE.Mesh(geo, mat);
+      modelGroup.add(mesh);
+    } else {
+      // PBR path: one MeshStandardMaterial per palette index used by the faces.
+      const byColor = new Map();
+      for (const f of faces) {
+        if (!byColor.has(f.color)) byColor.set(f.color, []);
+        byColor.get(f.color).push(f);
+      }
+      byColor.forEach((group, colorIndex) => {
+        const pos = [], nor = [], idx = [];
+        let vi = 0;
+        const rgb = pal[colorIndex] || [200, 200, 200];
+        const mat = surfaceMaterials[colorIndex] || { metallic: 0, roughness: 0, emissive: 0 };
+        for (const f of group) {
+          const c = f.corners, n = f.normal;
+          for (let k = 0; k < 4; k++) {
+            pos.push(c[k][0], c[k][1], c[k][2]);
+            nor.push(n[0], n[1], n[2]);
+          }
+          idx.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
+          vi += 4;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+        geo.setIndex(idx);
+        const material = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255),
+          metalness: mat.metallic,
+          roughness: mat.roughness,
+          emissive: new THREE.Color((rgb[0] / 255) * mat.emissive, (rgb[1] / 255) * mat.emissive, (rgb[2] / 255) * mat.emissive),
+          side: THREE.DoubleSide,
+        });
+        const pbrMesh = new THREE.Mesh(geo, material);
+        modelGroup.add(pbrMesh);
+        mesh = pbrMesh;
+      });
+    }
+
+    // wireframe for both paths
+    const wpos = [];
+    for (const f of faces) {
+      const c = f.corners;
       for (let k = 0; k < 4; k++) {
         const a = c[k], d = c[(k + 1) % 4];
         wpos.push(a[0], a[1], a[2], d[0], d[1], d[2]);
       }
-      vi += 4;
     }
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    geo.setIndex(idx);
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
-    mesh = new THREE.Mesh(geo, mat);
-    modelGroup.add(mesh);
-
     const wgeo = new THREE.BufferGeometry();
     wgeo.setAttribute('position', new THREE.Float32BufferAttribute(wpos, 3));
     const wmat = new THREE.LineBasicMaterial({ color: 0x0a0c0f, transparent: true, opacity: 0.55 });
@@ -190,7 +254,6 @@
     modelGroup.add(wire);
 
     // center the model at origin
-    const [DX, DY, DZ] = result.dims;
     modelGroup.children.forEach(o => { o.position.set(-DX / 2, -DY / 2, -DZ / 2); });
 
     // scale group so the largest sprite dim ~= 44 units, regardless of sprite size
@@ -199,6 +262,237 @@
     modelGroup.scale.setScalar(k);
     modelWorldDims = [DX * k, DY * k, DZ * k];
     cameraController.setDimensions(modelWorldDims);
+  }
+
+  // ---------- palette editor ----------
+  function initPaletteEdit(result) {
+    if (!result || !result.palette) {
+      state.paletteEdit = null;
+      return;
+    }
+    const palette = result.palette.slice();
+    const surfaceMaterials = (result.surfaceMaterials || palette.map(() => ({ metallic: 0, roughness: 0, emissive: 0 })))
+      .map(m => ({ metallic: m.metallic, roughness: m.roughness, emissive: m.emissive }));
+    state.paletteEdit = {
+      original: palette,
+      palette: palette.slice(),
+      originalSurfaceMaterials: surfaceMaterials.map(m => ({ ...m })),
+      surfaceMaterials: surfaceMaterials.map(m => ({ ...m })),
+      map: palette.map((_, i) => i),
+      dirty: false,
+    };
+  }
+
+  function resetPaletteEdit() {
+    if (!state.paletteEdit || !state.paletteEdit.original) return;
+    const palette = state.paletteEdit.original;
+    const originalSurfaceMaterials = state.paletteEdit.originalSurfaceMaterials;
+    state.paletteEdit.palette = palette.slice();
+    state.paletteEdit.surfaceMaterials = originalSurfaceMaterials.map(m => ({ ...m }));
+    state.paletteEdit.map = palette.map((_, i) => i);
+    state.paletteEdit.dirty = false;
+    buildPreview();
+  }
+
+  function buildPreview() {
+    if (!state.last || !state.paletteEdit || !state.paletteEdit.dirty) return null;
+    const { palette, map, surfaceMaterials, originalSurfaceMaterials } = state.paletteEdit;
+    const originalMaterials = originalSurfaceMaterials.map((m, originalIndex) => {
+      const currentIndex = map[originalIndex];
+      if (currentIndex < 0 || currentIndex >= surfaceMaterials.length) return m;
+      return surfaceMaterials[currentIndex];
+    });
+    const preview = PaletteIO.applyRemap({ ...state.last, surfaceMaterials: originalMaterials }, palette, map);
+    buildModel(preview);
+    updateReadouts(preview, 0);
+    return preview;
+  }
+
+  function effectiveResult() {
+    if (!state.last || !state.paletteEdit || !state.paletteEdit.dirty) return state.last;
+    const { palette, map, surfaceMaterials, originalSurfaceMaterials } = state.paletteEdit;
+    const originalMaterials = originalSurfaceMaterials.map((m, originalIndex) => {
+      const currentIndex = map[originalIndex];
+      if (currentIndex < 0 || currentIndex >= surfaceMaterials.length) return m;
+      return surfaceMaterials[currentIndex];
+    });
+    return PaletteIO.applyRemap({ ...state.last, surfaceMaterials: originalMaterials }, palette, map);
+  }
+
+  function guardPaletteIndex(index, max, label) {
+    if (!Number.isFinite(index) || index < 0 || index >= max) {
+      throw new RangeError(`${label} index ${index} out of range [0, ${max})`);
+    }
+  }
+
+  function editPaletteColor(index, rgb) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    guardPaletteIndex(index, edit.palette.length, 'editPaletteColor');
+    edit.palette[index] = [rgb[0] & 255, rgb[1] & 255, rgb[2] & 255];
+    edit.dirty = true;
+    buildPreview();
+    updateSwatches();
+  }
+
+  function editSurfaceMaterial(index, prop, value) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    guardPaletteIndex(index, edit.surfaceMaterials.length, 'editSurfaceMaterial');
+    const validProps = ['metallic', 'roughness', 'emissive'];
+    if (!validProps.includes(prop)) {
+      throw new RangeError(`editSurfaceMaterial: invalid property ${prop}`);
+    }
+    const num = Number(value);
+    const clamped = Number.isNaN(num) ? 0 : Math.max(0, Math.min(1, num));
+    edit.surfaceMaterials[index][prop] = clamped;
+    edit.dirty = true;
+    buildPreview();
+    updateSwatches();
+  }
+
+  function reorderPaletteColor(fromIndex, toIndex) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    const len = edit.palette.length;
+    guardPaletteIndex(fromIndex, len, 'reorderPaletteColor from');
+    guardPaletteIndex(toIndex, len, 'reorderPaletteColor to');
+    if (fromIndex === toIndex) return;
+    const moved = edit.palette.splice(fromIndex, 1)[0];
+    edit.palette.splice(toIndex, 0, moved);
+    const movedMaterial = edit.surfaceMaterials.splice(fromIndex, 1)[0];
+    edit.surfaceMaterials.splice(toIndex, 0, movedMaterial);
+    // Build originalIndex -> currentPosition map.
+    const positionMap = new Array(len);
+    for (let pos = 0; pos < len; pos++) {
+      let originalIndex = pos;
+      if (pos >= Math.min(fromIndex, toIndex) && pos <= Math.max(fromIndex, toIndex)) {
+        originalIndex = pos === toIndex ? fromIndex : (fromIndex < toIndex ? pos + 1 : pos - 1);
+      }
+      positionMap[originalIndex] = pos;
+    }
+    edit.map = edit.map.map(oldIndex => positionMap[oldIndex]);
+    edit.dirty = true;
+    buildPreview();
+    updateSwatches();
+  }
+
+  function mergePaletteColors(sourceIndex, targetIndex) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    const len = edit.palette.length;
+    guardPaletteIndex(sourceIndex, len, 'mergePaletteColors source');
+    guardPaletteIndex(targetIndex, len, 'mergePaletteColors target');
+    if (sourceIndex === targetIndex) {
+      throw new RangeError('mergePaletteColors source and target must be different');
+    }
+    edit.palette.splice(sourceIndex, 1);
+    edit.surfaceMaterials.splice(sourceIndex, 1);
+    edit.map = edit.map.map(oldIndex => oldIndex === sourceIndex ? targetIndex : (oldIndex > sourceIndex ? oldIndex - 1 : oldIndex));
+    edit.dirty = true;
+    buildPreview();
+    updateSwatches();
+  }
+
+  function importPaletteFile(text, ext) {
+    const edit = state.paletteEdit;
+    if (!edit) throw new Error('No palette to import into');
+    const parsed = ext === 'pal' ? PaletteIO.parseJascPal(text) : PaletteIO.parseGpl(text);
+    const colors = parsed.colors;
+    if (colors.length > edit.palette.length) {
+      throw new RangeError(`Imported palette too large: ${colors.length} colors exceed current ${edit.palette.length}`);
+    }
+    for (let i = 0; i < colors.length; i++) {
+      edit.palette[i] = colors[i];
+    }
+    edit.dirty = true;
+    buildPreview();
+    updateSwatches();
+  }
+
+  function exportPaletteFile(ext) {
+    const edit = state.paletteEdit;
+    if (!edit) throw new Error('No palette to export');
+    const palette = edit.dirty ? edit.palette : edit.original;
+    return ext === 'pal' ? PaletteIO.serializeJascPal(palette) : PaletteIO.serializeGpl(baseName(state.name), palette);
+  }
+
+  function triggerDownload(name, text) {
+    download(name, text);
+  }
+
+  function updateSwatches() {
+    const edit = state.paletteEdit;
+    const sw = $('swatches');
+    sw.replaceChildren();
+    const palette = edit ? edit.palette : (state.last && state.last.palette ? state.last.palette : []);
+    const materials = edit && edit.surfaceMaterials ? edit.surfaceMaterials : [];
+    palette.slice(0, 28).forEach((c, index) => {
+      const item = document.createElement('div');
+      item.className = 'swatch-item';
+      item.dataset.index = String(index);
+      item.draggable = true;
+      item.title = `Color ${index}: ${c[0]},${c[1]},${c[2]}`;
+      const i = document.createElement('i');
+      i.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
+      i.setAttribute('role', 'button');
+      i.setAttribute('aria-label', `Color ${index}`);
+      i.addEventListener('click', () => openColorEditor(index));
+      item.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.effectAllowed = 'move'; });
+      item.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+      item.addEventListener('drop', e => {
+        e.preventDefault();
+        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (Number.isNaN(from)) return;
+        if (e.shiftKey) {
+          mergePaletteColors(from, index);
+        } else {
+          reorderPaletteColor(from, index);
+        }
+      });
+      item.appendChild(i);
+      const mat = materials[index] || { metallic: 0, roughness: 0, emissive: 0 };
+      [['metallic', 'M'], ['roughness', 'R'], ['emissive', 'E']].forEach(([prop, label]) => {
+        const input = document.createElement('input');
+        input.className = 'mat';
+        input.type = 'number';
+        input.min = 0;
+        input.max = 1;
+        input.step = 0.1;
+        input.value = mat[prop].toFixed(1);
+        input.title = `${label} ${index}`;
+        input.setAttribute('aria-label', `${label} ${index}`);
+        input.addEventListener('change', e => {
+          e.stopPropagation();
+          editSurfaceMaterial(index, prop, e.target.value);
+        });
+        input.addEventListener('click', e => e.stopPropagation());
+        item.appendChild(input);
+      });
+      sw.appendChild(item);
+    });
+  }
+
+  let mergeSourceIndex = null;
+  function openColorEditor(index) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    guardPaletteIndex(index, edit.palette.length, 'openColorEditor');
+    const c = edit.palette[index];
+    const input = prompt ? prompt(`Edit color ${index} (R G B):`, `${c[0]} ${c[1]} ${c[2]}`) : null;
+    if (input == null) return;
+    const parts = input.trim().split(/\s+/);
+    if (parts.length < 3) { toast('Formato: R G B'); return; }
+    const rgb = parts.map(v => Math.max(0, Math.min(255, parseInt(v, 10) || 0)));
+    editPaletteColor(index, rgb);
+  }
+
+  function selectMergeSource(index) {
+    const edit = state.paletteEdit;
+    if (!edit) return;
+    guardPaletteIndex(index, edit.palette.length, 'selectMergeSource');
+    mergeSourceIndex = index;
+    toast(`Color ${index} seleccionado como origen. Shift+clic en el destino para fusionar.`);
   }
 
   // ---------- sheet slicing ----------
@@ -227,17 +521,30 @@
     return sliceFrameFromCanvas(state.sourceCanvas, state.sheet, state.sheet.frame);
   }
 
+  function modelBaseName(name) {
+    const stem = baseName(name);
+    return stem.replace(/-(front|back|left|right|top)$/, '');
+  }
+  function findModel(rec) {
+    const base = modelBaseName(rec.name);
+    return items.filter(it => modelBaseName(it.name) === base);
+  }
   function getItemViews(rec, sheet = state.sheet, frame = state.sheet.frame) {
     const views = { frame, views: [] };
-    const add = (kind, role, canvas) => {
+    const add = (kind, role, canvas, sourceRec = rec) => {
       if (!canvas) return;
-      const metadata = rec.viewMetadata && rec.viewMetadata[kind] ? cloneData(rec.viewMetadata[kind]) : { frameMode: 'static' };
+      const metadata = sourceRec.viewMetadata && sourceRec.viewMetadata[kind] ? cloneData(sourceRec.viewMetadata[kind]) : { frameMode: 'static' };
       const pixels = metadata.frameMode === 'sheet' ? sliceFrameFromCanvas(canvas, sheet, frame) : Voxel.canvasToPixels(canvas);
       views.views.push({ role, pixels, confidence: 1, frameMetadata: { ...metadata, selectedFrame: frame } });
     };
     add('side', 'side', rec.side);
     add('top', 'top', rec.top);
     add('depthMap', 'depthmap', rec.depthMap);
+    for (const item of findModel(rec)) {
+      if (item === rec) continue;
+      if (!item.role || item.role === 'front') continue;
+      add(item.role, item.role, item.canvas, item);
+    }
     return views;
   }
 
@@ -333,6 +640,7 @@
       if (seq !== renderSeq) return;
       const ms = (performance.now() - t0);
       state.last = result;
+      initPaletteEdit(result);
       buildModel(result);
       updateAlignmentViews();
       updateReadouts(result, ms);
@@ -380,13 +688,7 @@
     statDims.replaceChildren(dimsStrong, document.createTextNode(' grid'));
     $('statMain').textContent = `Voxelizado en ${ms.toFixed(0)} ms`;
     // swatches
-    const sw = $('swatches');
-    sw.replaceChildren();
-    r.palette.slice(0, 28).forEach(c => {
-      const i = document.createElement('i');
-      i.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
-      sw.appendChild(i);
-    });
+    updateSwatches();
     const diagnostics = $('diagnostics');
     diagnostics.replaceChildren();
     const warnings = r.diagnostics ? r.diagnostics.warnings : [];
@@ -434,6 +736,38 @@
       err: 'ERR',
     }[status] || status);
   }
+  const ROLES = [
+    { value: 'front', label: 'front' },
+    { value: 'back', label: 'back' },
+    { value: 'left', label: 'left' },
+    { value: 'right', label: 'right' },
+    { value: 'top', label: 'top' },
+  ];
+  function roleAxisHint(role) {
+    const orient = Voxel.CANONICAL_ORIENTATIONS[role];
+    return orient ? `${orient.horizontal} / ${orient.vertical}` : '';
+  }
+  function hasFrontSibling(rec) {
+    if (rec.role === 'front') return true;
+    return findModel(rec).some(it => it.role === 'front');
+  }
+  function refreshRoleSelectors() {
+    for (const rec of items) {
+      const enabled = hasFrontSibling(rec);
+      rec.roleSel.disabled = !enabled;
+      rec.roleSel.title = enabled ? '' : 'Añade una vista frontal con el mismo nombre base para asignar un rol';
+      let hint = null;
+      for (const child of rec.el.children) {
+        if (child.className === 'meta') {
+          for (const sub of child.children) {
+            if (sub.className === 'role-hint') { hint = sub; break; }
+          }
+          break;
+        }
+      }
+      if (hint) hint.textContent = roleAxisHint(rec.role);
+    }
+  }
   function addItem(name, canvas, status = 'queued', select = false) {
     const el = document.createElement('div');
     el.className = 'item';
@@ -442,12 +776,26 @@
     const meta = document.createElement('div'); meta.className = 'meta';
     const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = name;
     const sub = document.createElement('div'); sub.className = 'sub'; sub.textContent = `${canvas.width}×${canvas.height}`;
-    meta.appendChild(nm); meta.appendChild(sub);
+    const roleSel = document.createElement('select');
+    roleSel.className = 'role';
+    roleSel.setAttribute('aria-label', 'Vista ortográfica');
+    for (const r of ROLES) {
+      const opt = document.createElement('option');
+      opt.value = r.value;
+      opt.textContent = r.label;
+      roleSel.appendChild(opt);
+    }
+    const roleHint = document.createElement('span');
+    roleHint.className = 'role-hint';
+    roleHint.textContent = roleAxisHint('front');
+    roleSel.addEventListener('change', () => { rec.role = roleSel.value; refreshRoleSelectors(); recompute(); });
+    meta.appendChild(nm); meta.appendChild(sub); meta.appendChild(roleSel); meta.appendChild(roleHint);
     const st = document.createElement('span');
     el.appendChild(meta); el.appendChild(st);
-    const rec = { name, canvas, el, st, alignment: cloneData(defaultAlignment), viewMetadata: {
+    const rec = { name, canvas, el, st, roleSel, role: 'front', alignment: cloneData(defaultAlignment), viewMetadata: {
       side: { frameMode: 'static' }, top: { frameMode: 'static' }, depthMap: { frameMode: 'static' },
     } };
+    roleSel.value = rec.role;
     setItemStatus(rec, status);
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
@@ -455,6 +803,7 @@
     bindPseudoButton(el, () => selectItem(rec));
     document.getElementById('list').appendChild(el);
     items.push(rec);
+    refreshRoleSelectors();
     updateBatchCount();
     refreshActionState();
     if (select) selectItem(rec);
@@ -584,6 +933,7 @@
     downloadBlob(name, blob);
   }
   function downloadBlob(name, blob) {
+    downloadHistory.push({ name, blob, bytes: blob.parts ? blob.parts[0] : null });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
@@ -593,7 +943,7 @@
   function baseName(name) {
     return name.replace(/\.[a-z0-9]+$/i, '');
   }
-  function collectResultFiles(base, result, wantObj, wantVox, opts = state.opts) {
+  function collectResultFiles(base, result, wantObj, wantVox, wantGlb, wantFbx, opts = state.opts) {
     const files = [];
     if (wantObj) {
       const { obj, mtl } = VoxIO.exportOBJ(result, {
@@ -610,11 +960,24 @@
       const bytes = VoxIO.exportVox(result);
       files.push({ name: base + '.vox', data: bytes, type: 'application/octet-stream' });
     }
+    if (wantGlb) {
+      const bytes = VoxIO.exportGLB(result, {
+        scale: opts.scale,
+        useAO: opts.ao,
+        aoStrength: opts.aoStrength,
+        annotateAO: Voxel.annotateAO,
+      });
+      files.push({ name: base + '.glb', data: bytes, type: 'application/octet-stream' });
+    }
+    if (wantFbx) {
+      const text = VoxIO.exportFBX(result, { scale: opts.scale });
+      files.push({ name: base + '.fbx', data: text, type: 'text/plain' });
+    }
     return files;
   }
 
-  function exportResultFiles(base, result, wantObj, wantVox, opts = state.opts) {
-    const files = collectResultFiles(base, result, wantObj, wantVox, opts);
+  function exportResultFiles(base, result, wantObj, wantVox, wantGlb, wantFbx, opts = state.opts) {
+    const files = collectResultFiles(base, result, wantObj, wantVox, wantGlb, wantFbx, opts);
     files.forEach(file => downloadBlob(file.name, new Blob([file.data], { type: file.type })));
     return files.length;
   }
@@ -646,7 +1009,9 @@
     if (state.batchBusy) { toast('Ya hay un batch en curso'); return; }
     const wantObj = $('fmtObj').classList.contains('on');
     const wantVox = $('fmtVox').classList.contains('on');
-    if (!wantObj && !wantVox) { toast('Selecciona al menos un formato'); return; }
+    const wantGlb = $('fmtGlb').classList.contains('on');
+    const wantFbx = $('fmtFbx').classList.contains('on');
+    if (!wantObj && !wantVox && !wantGlb && !wantFbx) { toast('Selecciona al menos un formato'); return; }
     if (!window.ZipUtil || typeof window.ZipUtil.createZip !== 'function') {
       throw new Error('No se pudo inicializar el empaquetado ZIP');
     }
@@ -678,7 +1043,7 @@
           const exportName = job.archiveBase + suffix;
           try {
             const result = await spawnVoxelTask(job.pixels, job.opts, job.views);
-            const outFiles = collectResultFiles(exportName, result, wantObj, wantVox, job.opts);
+            const outFiles = collectResultFiles(exportName, result, wantObj, wantVox, wantGlb, wantFbx, job.opts);
             VoxelBatch.appendOutput(archiveFiles, outFiles, outputState);
             files += outFiles.length;
             VoxelBatch.markProgress(progress, job.recordIndex, true);
@@ -910,6 +1275,7 @@
   });
   slider('aoStr', 'vAoStr', v => state.opts.aoStrength = v / 100, v => v + '%');
   toggle('silhouetteEnabled', on => state.opts.silhouetteEnabled = on);
+  toggle('inferenceEnabled', on => state.opts.inferenceEnabled = on);
   slider('denoiseRadius', 'vDenoiseRadius', v => state.opts.denoiseRadius = v, v => `${v} px`);
   slider('closeRadius', 'vCloseRadius', v => state.opts.closeRadius = v, v => `${v} px`);
   slider('feather', 'vFeather', v => state.opts.feather = v / 100, v => `${v}%`);
@@ -1094,7 +1460,12 @@
     const el = $(id);
     el.addEventListener('click', () => setPressed(el, !el.classList.contains('on')));
   }
-  chk('fmtVox'); chk('fmtObj');
+  chk('fmtVox'); chk('fmtObj'); chk('fmtGlb'); chk('fmtFbx');
+  // Default all export formats to enabled (matches the `class="chk on"` markup).
+  setPressed($('fmtVox'), true);
+  setPressed($('fmtObj'), true);
+  setPressed($('fmtGlb'), true);
+  setPressed($('fmtFbx'), true);
 
   // viewport toolbar
   $('btnRotate').addEventListener('click', () => {
@@ -1111,13 +1482,48 @@
     if (!state.last || state.busy) { toast('Esperá a que termine la voxelización actual'); return; }
     const wantObj = $('fmtObj').classList.contains('on');
     const wantVox = $('fmtVox').classList.contains('on');
-    if (!wantObj && !wantVox) { toast('Selecciona al menos un formato'); return; }
+    const wantGlb = $('fmtGlb').classList.contains('on');
+    const wantFbx = $('fmtFbx').classList.contains('on');
+    if (!wantObj && !wantVox && !wantGlb && !wantFbx) { toast('Selecciona al menos un formato'); return; }
     const base = baseName(state.name);
     const out = [];
-    exportResultFiles(base, state.last, wantObj, wantVox);
+    exportResultFiles(base, effectiveResult(), wantObj, wantVox, wantGlb, wantFbx);
     if (wantObj) out.push('.obj+.mtl');
     if (wantVox) out.push('.vox');
+    if (wantGlb) out.push('.glb');
+    if (wantFbx) out.push('.fbx');
     toast([{ text: 'Exportado ' }, { accent: base }, { text: ` → ${out.join(' · ')}` }]);
+  });
+
+  // palette editor
+  $('importPaletteBtn').addEventListener('click', () => $('paletteFileInput').click());
+  $('exportPaletteGplBtn').addEventListener('click', () => {
+    if (!state.paletteEdit) { toast('No hay paleta para exportar'); return; }
+    const base = baseName(state.name);
+    triggerDownload(`${base}.gpl`, exportPaletteFile('gpl'));
+  });
+  $('exportPalettePalBtn').addEventListener('click', () => {
+    if (!state.paletteEdit) { toast('No hay paleta para exportar'); return; }
+    const base = baseName(state.name);
+    triggerDownload(`${base}.pal`, exportPaletteFile('pal'));
+  });
+  $('resetPaletteBtn').addEventListener('click', () => resetPaletteEdit());
+  $('paletteFileInput').addEventListener('change', () => {
+    const f = $('paletteFileInput').files[0];
+    if (!f) return;
+    const ext = f.name.toLowerCase().endsWith('.pal') ? 'pal' : 'gpl';
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        importPaletteFile(String(reader.result), ext);
+        toast('Paleta importada');
+      } catch (error) {
+        toast(error.message || 'No se pudo importar la paleta');
+      }
+    };
+    reader.onerror = () => toast('No se pudo leer el archivo de paleta');
+    reader.readAsText(f);
+    $('paletteFileInput').value = '';
   });
   $('cancelBatchBtn').addEventListener('click', cancelBatchExport);
   $('exportBatchBtn').addEventListener('click', () => { exportBatch().catch(err => {
@@ -1186,6 +1592,30 @@
     buildModel,
     invalidatePreviewEvidence,
     refreshActionState,
+    addItem,
+    findModel,
+    getItemViews,
+    get items() { return items; },
+    baseName,
+    modelBaseName,
+    roleAxisHint,
+    hasFrontSibling,
+    refreshRoleSelectors,
+    initPaletteEdit,
+    buildPreview,
+    resetPaletteEdit,
+    effectiveResult,
+    editPaletteColor,
+    editSurfaceMaterial,
+    reorderPaletteColor,
+    mergePaletteColors,
+    importPaletteFile,
+    exportPaletteFile,
+    updateSwatches,
+    selectMergeSource,
+    collectResultFiles,
+    exportBatch,
+    downloadHistory,
   };
 
   // wait for fonts/three then boot

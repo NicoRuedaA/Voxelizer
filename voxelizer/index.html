@@ -110,6 +110,17 @@ body{
 .st.queued{color:var(--dim);background:var(--bg4)}
 .st.progress{color:var(--accent);background:rgba(255,149,87,.12)}
 .st.err{color:#ff8f8f;background:rgba(255,96,96,.12)}
+.item .role{
+  margin-top:4px;background:var(--bg3);border:1px solid var(--line2);color:var(--dim);
+  border-radius:4px;padding:2px 5px;font-size:10px;width:100%;cursor:pointer;
+}
+.item .role:disabled{
+  opacity:.55;cursor:not-allowed;background:var(--bg4);
+}
+.item .role:focus{outline:none;border-color:var(--sel)}
+.item .role-hint{
+  display:block;margin-top:2px;font-size:9px;color:var(--dim2);white-space:nowrap;
+}
 
 /* ---------- viewport ---------- */
 .vp-toolbar{
@@ -185,8 +196,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .num{width:48px;background:var(--bg3);border:1px solid var(--line2);color:var(--txt);border-radius:5px;padding:4px 6px;font-family:var(--ui);font-size:11px;text-align:center}
 .num:focus{outline:none;border-color:var(--sel)}
 
-.swatches{display:flex;flex-wrap:wrap;gap:4px;padding:2px 14px 0}
-.swatches i{width:15px;height:15px;border-radius:3px;border:1px solid rgba(255,255,255,.12);display:block}
+.swatches{display:flex;flex-direction:column;gap:4px;padding:2px 14px 0}
+.swatch-item{display:flex;align-items:center;gap:4px;padding:2px 4px;border-radius:5px;background:var(--bg2);border:1px solid var(--line);cursor:move}
+.swatch-item i{width:15px;height:15px;border-radius:3px;border:1px solid rgba(255,255,255,.12);display:block;cursor:pointer;flex:0 0 15px}
+.swatch-item .mat{width:36px;background:var(--bg3);border:1px solid var(--line2);color:var(--txt);border-radius:4px;padding:3px 4px;font-size:10px;text-align:center;cursor:text}
+.swatch-item .mat:focus{outline:none;border-color:var(--sel)}
 
 .chk{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0;background:none;border:0;color:var(--txt);width:100%;text-align:left}
 .box{width:16px;height:16px;border-radius:4px;border:1px solid var(--line2);background:var(--bg3);display:flex;align-items:center;justify-content:center;color:transparent;font-size:11px}
@@ -353,7 +367,7 @@ input[type=range]:focus-visible,
       <button type="button" class="drop" id="drop" aria-label="Cargar sprites PNG">
         <span class="ic">⬓</span>
         <b>Suelta PNGs aquí</b>
-        <small>o haz clic para elegir · 1 modelo por archivo</small>
+        <small>o haz clic para elegir · 1 modelo por archivo (o vistas con mismo nombre base)</small>
       </button>
       <input type="file" id="file" accept="image/png,image/*" multiple hidden>
       <div class="list" id="list"></div>
@@ -453,6 +467,8 @@ input[type=range]:focus-visible,
               <div id="slotDepth" class="vslot" role="button" tabindex="0" aria-label="Añadir mapa de profundidad">Depth<span>+ añadir</span></div>
             </div>
             <div class="hint" style="text-align:left;margin-top:6px">Ejes ortográficos: frontal X/Y, perfil Z/Y y cenital X/Z. Las vistas que coinciden con el spritesheet se asocian por frame; otras permanecen estáticas.</div>
+            <div class="row" style="margin-top:9px"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
+            <div class="hint" id="inferenceHint" style="text-align:left">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
             <details class="adv-panel" id="advancedFusion">
               <summary>Fusión y confianza</summary>
               <div class="seg" id="reconstructionModeSeg" style="margin-top:10px"><button data-reconstruction="strict" class="on">Estricto</button><button data-reconstruction="weighted">Ponderado</button></div>
@@ -566,6 +582,17 @@ input[type=range]:focus-visible,
             <input type="range" id="colors" min="2" max="64" value="32">
             <div class="row" style="margin-top:11px"><span class="lbl">Color de superficies</span></div>
             <div class="seg" id="colorModeSeg"><button data-color="front" class="on">Solo frontal</button><button data-color="auxiliary">Fusionar vistas</button></div>
+            <div class="row" style="margin-top:11px"><span class="lbl">Editor de paleta</span></div>
+            <div class="align-actions" style="margin-top:8px">
+              <button type="button" class="mini-reset" id="importPaletteBtn">Importar</button>
+              <button type="button" class="mini-reset" id="exportPaletteGplBtn">.gpl</button>
+              <button type="button" class="mini-reset" id="exportPalettePalBtn">.pal</button>
+              <button type="button" class="mini-reset" id="resetPaletteBtn">Restablecer</button>
+            </div>
+            <input type="file" id="paletteFileInput" accept=".gpl,.pal" style="display:none">
+            <div class="hint" style="text-align:left;margin-top:6px">
+              Clic para editar un color. Arrastra para reordenar. Shift+clic en un color para fusionar desde el color seleccionado.
+            </div>
           </div>
           <div class="swatches" id="swatches"></div>
         </div>
@@ -588,6 +615,8 @@ input[type=range]:focus-visible,
           <div class="ctl">
             <button type="button" class="chk on" id="fmtVox" aria-pressed="true"><span class="box">✓</span> .vox <span class="fmt-meta">MagicaVoxel · Z-up</span></button>
             <button type="button" class="chk on" id="fmtObj" aria-pressed="true"><span class="box">✓</span> .obj + .mtl <span class="fmt-meta">Unity/Godot · Y-up</span></button>
+            <button type="button" class="chk on" id="fmtGlb" aria-pressed="true"><span class="box">✓</span> .glb <span class="fmt-meta">glTF 2.0 · Y-up</span></button>
+            <button type="button" class="chk on" id="fmtFbx" aria-pressed="true"><span class="box">✓</span> .fbx <span class="fmt-meta">FBX ASCII 7.5 · Y-up</span></button>
           </div>
           <div class="export">
             <button class="btn" id="exportBtn">⬇ Exportar modelo</button>

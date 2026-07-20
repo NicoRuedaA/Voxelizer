@@ -1,0 +1,20 @@
+schema: spec-driven
+change: symmetry-inference
+phase: spec
+status: completed
+preflight: automatic
+artifacts:
+  engram:
+    explore: sdd/symmetry-inference/explore
+    proposal: sdd/symmetry-inference/proposal
+    spec: sdd/symmetry-inference/spec
+  openspec:
+    exploration: openspec/changes/symmetry-inference/exploration.md
+    proposal: openspec/changes/symmetry-inference/proposal.md
+    spec: openspec/changes/symmetry-inference/specs/mirrored-back-inference/spec.md
+next: sdd-design
+delivery_strategy: auto-chain
+review_budget: 800
+chain_strategy: stacked-to-main
+skip_validation_blockers: true
+warnings: []
