@@ -521,14 +521,6 @@
     return sliceFrameFromCanvas(state.sourceCanvas, state.sheet, state.sheet.frame);
   }
 
-  function modelBaseName(name) {
-    const stem = baseName(name);
-    return stem.replace(/-(front|back|left|right|top)$/, '');
-  }
-  function findModel(rec) {
-    const base = modelBaseName(rec.name);
-    return items.filter(it => modelBaseName(it.name) === base);
-  }
   function getItemViews(rec, sheet = state.sheet, frame = state.sheet.frame) {
     const views = { frame, views: [] };
     const add = (kind, role, canvas, sourceRec = rec) => {
@@ -537,14 +529,12 @@
       const pixels = metadata.frameMode === 'sheet' ? sliceFrameFromCanvas(canvas, sheet, frame) : Voxel.canvasToPixels(canvas);
       views.views.push({ role, pixels, confidence: 1, frameMetadata: { ...metadata, selectedFrame: frame } });
     };
+    add('back', 'back', rec.back);
+    add('left', 'left', rec.left);
+    add('right', 'right', rec.right);
     add('side', 'side', rec.side);
     add('top', 'top', rec.top);
     add('depthMap', 'depthmap', rec.depthMap);
-    for (const item of findModel(rec)) {
-      if (item === rec) continue;
-      if (!item.role || item.role === 'front') continue;
-      add(item.role, item.role, item.canvas, item);
-    }
     return views;
   }
 
@@ -736,37 +726,22 @@
       err: 'ERR',
     }[status] || status);
   }
-  const ROLES = [
-    { value: 'front', label: 'front' },
-    { value: 'back', label: 'back' },
-    { value: 'left', label: 'left' },
-    { value: 'right', label: 'right' },
-    { value: 'top', label: 'top' },
-  ];
-  function roleAxisHint(role) {
-    const orient = Voxel.CANONICAL_ORIENTATIONS[role];
-    return orient ? `${orient.horizontal} / ${orient.vertical}` : '';
-  }
-  function hasFrontSibling(rec) {
-    if (rec.role === 'front') return true;
-    return findModel(rec).some(it => it.role === 'front');
-  }
-  function refreshRoleSelectors() {
-    for (const rec of items) {
-      const enabled = hasFrontSibling(rec);
-      rec.roleSel.disabled = !enabled;
-      rec.roleSel.title = enabled ? '' : 'Añade una vista frontal con el mismo nombre base para asignar un rol';
-      let hint = null;
-      for (const child of rec.el.children) {
-        if (child.className === 'meta') {
-          for (const sub of child.children) {
-            if (sub.className === 'role-hint') { hint = sub; break; }
-          }
-          break;
-        }
-      }
-      if (hint) hint.textContent = roleAxisHint(rec.role);
+  function removeItem(rec) {
+    const idx = items.indexOf(rec);
+    if (idx === -1) return;
+    items.splice(idx, 1);
+    rec.el.remove();
+    if (items.length === 0) {
+      state.sourceCanvas = null;
+      state.name = null;
+      invalidatePreviewEvidence('No hay sprites');
+      disposeModel();
+    } else if (rec.canvas === state.sourceCanvas) {
+      const nextIdx = Math.min(idx, items.length - 1);
+      selectItem(items[nextIdx]);
     }
+    updateBatchCount();
+    refreshActionState();
   }
   function addItem(name, canvas, status = 'queued', select = false) {
     const el = document.createElement('div');
@@ -776,26 +751,19 @@
     const meta = document.createElement('div'); meta.className = 'meta';
     const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = name;
     const sub = document.createElement('div'); sub.className = 'sub'; sub.textContent = `${canvas.width}×${canvas.height}`;
-    const roleSel = document.createElement('select');
-    roleSel.className = 'role';
-    roleSel.setAttribute('aria-label', 'Vista ortográfica');
-    for (const r of ROLES) {
-      const opt = document.createElement('option');
-      opt.value = r.value;
-      opt.textContent = r.label;
-      roleSel.appendChild(opt);
-    }
-    const roleHint = document.createElement('span');
-    roleHint.className = 'role-hint';
-    roleHint.textContent = roleAxisHint('front');
-    roleSel.addEventListener('change', () => { rec.role = roleSel.value; refreshRoleSelectors(); recompute(); });
-    meta.appendChild(nm); meta.appendChild(sub); meta.appendChild(roleSel); meta.appendChild(roleHint);
+    meta.appendChild(nm); meta.appendChild(sub);
     const st = document.createElement('span');
     el.appendChild(meta); el.appendChild(st);
-    const rec = { name, canvas, el, st, roleSel, role: 'front', alignment: cloneData(defaultAlignment), viewMetadata: {
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'del-item';
+    delBtn.textContent = '×';
+    delBtn.setAttribute('aria-label', `Eliminar ${name}`);
+    delBtn.addEventListener('click', e => { e.stopPropagation(); removeItem(rec); });
+    el.appendChild(delBtn);
+    const rec = { name, canvas, el, st, alignment: cloneData(defaultAlignment), viewMetadata: {
       side: { frameMode: 'static' }, top: { frameMode: 'static' }, depthMap: { frameMode: 'static' },
     } };
-    roleSel.value = rec.role;
     setItemStatus(rec, status);
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
@@ -803,7 +771,6 @@
     bindPseudoButton(el, () => selectItem(rec));
     document.getElementById('list').appendChild(el);
     items.push(rec);
-    refreshRoleSelectors();
     updateBatchCount();
     refreshActionState();
     if (select) selectItem(rec);
@@ -820,11 +787,12 @@
     state.sheet.frame = 0;
     state.diagnosticViewIds = {};
     state.opts.alignment = ensureRecordAlignment(rec);
-    state.views = { side: rec.side || null, top: rec.top || null, depthMap: rec.depthMap || null };
+    const viewKinds = ['back', 'left', 'right', 'side', 'top', 'depthMap'];
+    state.views = {};
+    viewKinds.forEach(kind => state.views[kind] = rec[kind] || null);
     ['side', 'top', 'depthMap'].forEach(kind => syncToggle(kind + 'FollowsSheet', rec.viewMetadata && rec.viewMetadata[kind] && rec.viewMetadata[kind].frameMode === 'sheet'));
-    fillSlot('side', state.views.side);
-    fillSlot('top', state.views.top);
-    fillSlot('depthMap', state.views.depthMap);
+    fillFrontSlot(rec.canvas);
+    viewKinds.forEach(kind => fillSlot(kind, state.views[kind]));
     $('srcName').textContent = rec.name;
     state.last = null;
     updateAlignmentViews();
@@ -836,13 +804,24 @@
   }
 
   // ---------- multi-view slots ----------
+  const SLOT_IDS = {
+    back: 'slotBack', left: 'slotLeft', right: 'slotRight',
+    side: 'slotSide', top: 'slotTop', depthMap: 'slotDepth',
+  };
+  const SLOT_LABELS = {
+    back: 'Trasera', left: 'Izquierda', right: 'Derecha',
+    side: 'Perfil', top: 'Cenital', depthMap: 'Depth',
+  };
   function fillSlot(kind, canvas) {
-    const el = $(kind === 'side' ? 'slotSide' : (kind === 'top' ? 'slotTop' : 'slotDepth'));
-    const label = kind === 'side' ? 'Perfil' : (kind === 'top' ? 'Cenital' : 'Depth');
+    const id = SLOT_IDS[kind];
+    if (!id) return;
+    const el = $(id);
+    if (!el) return;
+    const label = SLOT_LABELS[kind] || kind;
     el.replaceChildren();
     if (canvas) {
       el.classList.add('set');
-      el.setAttribute('aria-label', `${label} cargado. Pulsa para reemplazar la imagen.`);
+      el.setAttribute('aria-label', `${label} cargada. Pulsa para reemplazar.`);
       el.appendChild(thumbCanvas(canvas, 46));
       const x = document.createElement('button');
       x.type = 'button';
@@ -858,6 +837,22 @@
       const hint = document.createElement('span');
       hint.textContent = '+ añadir';
       el.append(text, hint);
+    }
+  }
+  function fillFrontSlot(canvas) {
+    const el = $('slotFront');
+    if (!el) return;
+    el.replaceChildren();
+    if (canvas) {
+      el.classList.add('set');
+      el.appendChild(thumbCanvas(canvas, 46));
+      const label = document.createElement('span');
+      label.textContent = 'Frontal';
+      el.appendChild(label);
+    } else {
+      el.classList.remove('set');
+      el.replaceChildren();
+      el.appendChild(document.createTextNode('Frontal'));
     }
   }
   function setView(kind, canvas) {
@@ -1544,18 +1539,28 @@
   drop.addEventListener('drop', e => { [...e.dataTransfer.files].filter(f => f.type.startsWith('image')).forEach(loadImageFile); });
 
   // multi-view slot pickers (+ drag-drop onto a slot)
-  bindPseudoButton($('slotSide'), () => $('fileSide').click());
-  bindPseudoButton($('slotTop'), () => $('fileTop').click());
-  bindPseudoButton($('slotDepth'), () => $('fileDepth').click());
-  $('fileSide').addEventListener('change', () => { const f = $('fileSide').files[0]; if (f) fileToCanvas(f, cv => setView('side', cv)); $('fileSide').value = ''; });
-  $('fileTop').addEventListener('change', () => { const f = $('fileTop').files[0]; if (f) fileToCanvas(f, cv => setView('top', cv)); $('fileTop').value = ''; });
-  $('fileDepth').addEventListener('change', () => { const f = $('fileDepth').files[0]; if (f) fileToCanvas(f, cv => setView('depthMap', cv)); $('fileDepth').value = ''; });
-  [['slotSide', 'side'], ['slotTop', 'top'], ['slotDepth', 'depthMap']].forEach(([id, kind]) => {
-    const s = $(id);
-    ['dragenter', 'dragover'].forEach(ev => s.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); s.style.borderColor = 'var(--sel)'; }));
-    ['dragleave', 'drop'].forEach(ev => s.addEventListener(ev, e => { e.preventDefault(); s.style.borderColor = ''; }));
-    s.addEventListener('drop', e => { e.stopPropagation(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image')); if (f) fileToCanvas(f, cv => setView(kind, cv)); });
-  });
+  const SLOT_BINDINGS = [
+    ['slotBack', 'back', 'fileBack'],
+    ['slotLeft', 'left', 'fileLeft'],
+    ['slotRight', 'right', 'fileRight'],
+    ['slotSide', 'side', 'fileSide'],
+    ['slotTop', 'top', 'fileTop'],
+    ['slotDepth', 'depthMap', 'fileDepth'],
+  ];
+  for (const [slotId, kind, fileId] of SLOT_BINDINGS) {
+    const slot = $(slotId);
+    const fileInput = $(fileId);
+    if (!slot || !fileInput) continue;
+    bindPseudoButton(slot, () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files[0];
+      if (f) fileToCanvas(f, cv => setView(kind, cv));
+      fileInput.value = '';
+    });
+    ['dragenter', 'dragover'].forEach(ev => slot.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); slot.style.borderColor = 'var(--sel)'; }));
+    ['dragleave', 'drop'].forEach(ev => slot.addEventListener(ev, e => { e.preventDefault(); slot.style.borderColor = ''; }));
+    slot.addEventListener('drop', e => { e.stopPropagation(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image')); if (f) fileToCanvas(f, cv => setView(kind, cv)); });
+  }
   // allow dropping anywhere on the window
   const win = document.querySelector('.window');
   ['dragover'].forEach(ev => win.addEventListener(ev, e => e.preventDefault()));
@@ -1593,14 +1598,10 @@
     invalidatePreviewEvidence,
     refreshActionState,
     addItem,
-    findModel,
+    removeItem,
     getItemViews,
     get items() { return items; },
     baseName,
-    modelBaseName,
-    roleAxisHint,
-    hasFrontSibling,
-    refreshRoleSelectors,
     initPaletteEdit,
     buildPreview,
     resetPaletteEdit,

@@ -1341,6 +1341,7 @@ function _viewSample(view, x, py, z) {
   if (view.role === 'side' || view.role === 'right') return z + view.w * py;
   if (view.role === 'left') return (view.w - 1 - z) + view.w * py;
   if (view.role === 'top') return x + view.w * z;
+  if (view.role === 'back') return (view.w - 1 - x) + view.w * py;
   return x + view.w * py;
 }
 function _viewWeight(view, config) {

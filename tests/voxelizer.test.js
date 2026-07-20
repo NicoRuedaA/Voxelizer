@@ -2012,15 +2012,21 @@ test('manifest batch snapshottea una vez, genera lazy, limita memoria y nombres 
 
 // ---------- Unit 1: view-merging foundation + UI role selector ----------
 
-test('app addItem crea item con rol front por defecto', () => {
+test('app addItem crea item con datos basicos', () => {
   const win = loadAppRuntime();
   const dbg = win.__dbg;
   const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
   const rec = dbg.addItem('hero.png', canvas, 'done', false);
-  assert.equal(rec.role, 'front');
+  assert.equal(rec.name, 'hero.png');
+  assert.equal(rec.canvas, canvas);
+  assert.ok(rec.el);
+  assert.ok(rec.st);
+  assert.ok(rec.alignment);
+  const delBtn = rec.el.children.find(c => c.className && c.className.includes('del-item'));
+  assert.ok(delBtn, 'delete button should exist');
 });
 
-test('app renderiza selector de rol en cada item', () => {
+test('app renderiza item sin selector de rol', () => {
   const win = loadAppRuntime();
   const dbg = win.__dbg;
   const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
@@ -2028,41 +2034,22 @@ test('app renderiza selector de rol en cada item', () => {
   const meta = rec.el.children.find(child => child.className === 'meta');
   assert.ok(meta);
   const roleSel = meta.children.find(child => child.className === 'role');
-  assert.ok(roleSel);
-  assert.equal(roleSel.value, 'front');
-  assert.equal(roleSel.getAttribute('aria-label'), 'Vista ortográfica');
-  const options = roleSel.children.map(opt => opt.value);
-  assert.deepEqual(options, ['front', 'back', 'left', 'right', 'top']);
+  assert.equal(roleSel, undefined, 'role selector should not exist');
+  const delBtn = rec.el.children.find(c => c.className && c.className.includes('del-item'));
+  assert.ok(delBtn, 'delete button should exist');
+  assert.equal(delBtn.getAttribute('aria-label'), 'Eliminar hero.png');
 });
 
-test('findModel devuelve hermanos con mismo nombre base de modelo', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const front = dbg.addItem('hero.png', canvas, 'done', false);
-  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
-  const frontNamed = dbg.addItem('hero-front.png', canvas, 'done', false);
-  const other = dbg.addItem('enemy.png', canvas, 'done', false);
-  const model = dbg.findModel(front);
-  assert.ok(model.includes(front));
-  assert.ok(model.includes(back));
-  assert.ok(model.includes(frontNamed));
-  assert.ok(!model.includes(other));
-  assert.equal(model.length, 3);
-});
-
-test('getItemViews emite vistas con roles de hermanos del modelo activo', () => {
+test('getItemViews emite vistas desde slots del item activo', () => {
   const win = loadAppRuntime();
   const dbg = win.__dbg;
   const frontCanvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
   const backCanvas = fakeCanvas(2, 2, [0, 0, 255, 255]);
   const leftCanvas = fakeCanvas(2, 2, [0, 255, 0, 255]);
-  const front = dbg.addItem('hero.png', frontCanvas, 'done', false);
-  const back = dbg.addItem('hero-back.png', backCanvas, 'done', false);
-  back.role = 'back';
-  const left = dbg.addItem('hero-left.png', leftCanvas, 'done', false);
-  left.role = 'left';
-  const views = dbg.getItemViews(front);
+  const rec = dbg.addItem('hero.png', frontCanvas, 'done', false);
+  rec.back = backCanvas;
+  rec.left = leftCanvas;
+  const views = dbg.getItemViews(rec);
   assert.equal(views.views.length, 2);
   const roles = views.views.map(view => view.role);
   assert.ok(roles.includes('back'));
@@ -2074,16 +2061,15 @@ test('getItemViews emite vistas con roles de hermanos del modelo activo', () => 
   assert.equal(backView.pixels.data[2], 255);
 });
 
-test('batch manifest snapshottea rol y filtra registros front', () => {
+test('batch manifest procesa cada registro con sus slots de vista', () => {
   const context = { window: {}, console, structuredClone, TextEncoder };
   vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
   const Batch = context.window.VoxelBatch;
   const source = makePixels(2, 2, () => [255, 0, 0, 255]);
   const back = makePixels(2, 2, () => [0, 0, 255, 255]);
   const records = [
-    { name: 'hero.png', canvas: source, role: 'front' },
-    { name: 'hero-back.png', canvas: back, role: 'back' },
-    { name: 'enemy.png', canvas: source, role: 'front' },
+    { name: 'hero.png', canvas: source, back },
+    { name: 'enemy.png', canvas: source },
   ];
   const manifest = Batch.createManifest(records, { depth: 2 }, { c: 1, r: 1 }, {
     readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
@@ -2095,17 +2081,19 @@ test('batch manifest snapshottea rol y filtra registros front', () => {
   assert.ok(hero);
   assert.equal(hero.views.back.w, 2);
   assert.deepEqual(Array.from(hero.views.back.data), Array.from(back.data));
+  const enemy = manifest.records.find(record => record.archiveBase === 'enemy');
+  assert.ok(enemy);
+  assert.equal(enemy.views.back, undefined);
 });
 
-test('jobAt solo crea trabajos front y adjunta vistas de hermanos', () => {
+test('jobAt crea trabajos para cada registro con vistas desde slots', () => {
   const context = { window: {}, console, structuredClone, TextEncoder };
   vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
   const Batch = context.window.VoxelBatch;
   const source = makePixels(2, 2, () => [255, 0, 0, 255]);
   const back = makePixels(2, 2, () => [0, 0, 255, 255]);
   const records = [
-    { name: 'hero.png', canvas: source, role: 'front' },
-    { name: 'hero-back.png', canvas: back, role: 'back' },
+    { name: 'hero.png', canvas: source, back },
   ];
   const manifest = Batch.createManifest(records, { depth: 2 }, { c: 1, r: 1 }, {
     readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
@@ -2148,7 +2136,7 @@ test('prepareSilhouettes muestrea back a W x H con peso frontWeight', () => {
   assert.equal(prepared.h, 3);
   assert.equal(prepared.role, 'back');
   assert.equal(Voxel._viewSample(prepared, 1, 1, 0), 1 + 3 * 1);
-  assert.equal(Voxel._viewSample(prepared, 2, 0, 1), 2 + 3 * 0);
+  assert.equal(Voxel._viewSample(prepared, 2, 0, 1), 0);
   const weight = Voxel._viewWeight(prepared, config);
   assert.equal(weight, config.reconstruction.frontWeight);
   assert.ok(silhouettes.previews.back);
@@ -2378,100 +2366,7 @@ test('colores auxiliares de left/right/top se mezclan en caras laterales y cenit
   assert.equal(topColor[2], 0);
 });
 
-// ---------- Phase 6: Cleanup UI selectors ----------
 
-test('roleAxisHint devuelve ejes canonicos para cada rol', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  assert.equal(dbg.roleAxisHint('front'), '+X / -Y');
-  assert.equal(dbg.roleAxisHint('back'), '-X / -Y');
-  assert.equal(dbg.roleAxisHint('left'), '-Z / -Y');
-  assert.equal(dbg.roleAxisHint('right'), '+Z / -Y');
-  assert.equal(dbg.roleAxisHint('top'), '+X / +Z');
-  assert.equal(dbg.roleAxisHint('unknown'), '');
-});
-
-test('hasFrontSibling devuelve false solo para items sin vista frontal propia ni hermano', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const front = dbg.addItem('hero.png', canvas, 'done', false);
-  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
-  back.role = 'back';
-  const other = dbg.addItem('enemy.png', canvas, 'done', false);
-  other.role = 'back';
-  const lone = dbg.addItem('lone-back.png', canvas, 'done', false);
-  lone.role = 'back';
-  assert.equal(dbg.hasFrontSibling(front), true);
-  assert.equal(dbg.hasFrontSibling(back), true);
-  assert.equal(dbg.hasFrontSibling(other), false);
-  assert.equal(dbg.hasFrontSibling(lone), false);
-});
-
-test('selector de rol se deshabilita para item sin hermano frontal', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
-  back.role = 'back';
-  dbg.refreshRoleSelectors();
-  const meta = back.el.children.find(child => child.className === 'meta');
-  const roleSel = meta.children.find(child => child.className === 'role');
-  assert.equal(roleSel.disabled, true);
-  assert.ok(roleSel.title.includes('frontal'));
-});
-
-test('selector de rol se habilita cuando existe un hermano frontal', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const front = dbg.addItem('hero.png', canvas, 'done', false);
-  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
-  back.role = 'back';
-  dbg.refreshRoleSelectors();
-  const meta = back.el.children.find(child => child.className === 'meta');
-  const roleSel = meta.children.find(child => child.className === 'role');
-  assert.equal(roleSel.disabled, false);
-  assert.equal(roleSel.title, '');
-});
-
-test('renderiza pista de eje junto al selector de rol', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const rec = dbg.addItem('hero.png', canvas, 'done', false);
-  const meta = rec.el.children.find(child => child.className === 'meta');
-  const hint = meta.children.find(child => child.className === 'role-hint');
-  assert.ok(hint);
-  assert.equal(hint.textContent, '+X / -Y');
-});
-
-test('pista de eje se actualiza al cambiar el rol', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const rec = dbg.addItem('hero.png', canvas, 'done', false);
-  const meta = rec.el.children.find(child => child.className === 'meta');
-  const roleSel = meta.children.find(child => child.className === 'role');
-  const hint = meta.children.find(child => child.className === 'role-hint');
-  roleSel.value = 'top';
-  roleSel.dispatchEvent({ type: 'change' });
-  assert.equal(hint.textContent, '+X / +Z');
-});
-
-test('cambiar a rol frontal habilita selectores de hermanos', () => {
-  const win = loadAppRuntime();
-  const dbg = win.__dbg;
-  const canvas = fakeCanvas(2, 2, [255, 0, 0, 255]);
-  const back = dbg.addItem('hero-back.png', canvas, 'done', false);
-  back.role = 'back';
-  dbg.refreshRoleSelectors();
-  assert.equal(back.roleSel.disabled, true);
-  const front = dbg.addItem('hero.png', canvas, 'done', false);
-  // After adding the front sibling, the back selector should become enabled.
-  dbg.refreshRoleSelectors();
-  assert.equal(back.roleSel.disabled, false);
-});
 
 // ---------- Phase 7: Mirrored-back inference ----------
 
@@ -2569,12 +2464,12 @@ test('inferencia con back deshabilitado no genera vista trasera', () => {
   assert.equal(result.diagnostics.views.find(view => view.role === 'back'), undefined);
 });
 
-test('batch manifest incluye vista back inferida sin registros extras', () => {
+test('batch manifest incluye vista back inferida sin slot real', () => {
   const context = { window: {}, console, structuredClone, TextEncoder };
   vm.createContext(context); loadScript('batch.js', context); loadScript('zip.js', context);
   const Batch = context.window.VoxelBatch;
   const source = makePixels(3, 2, (x, y) => [x * 80, y * 80, 120, 255]);
-  const records = [{ name: 'hero.png', canvas: source, role: 'front' }];
+  const records = [{ name: 'hero.png', canvas: source }];
   const manifest = Batch.createManifest(records, { depth: 2, inferenceEnabled: true }, { c: 1, r: 1 }, {
     readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
   });
@@ -2597,8 +2492,7 @@ test('batch manifest incluye vista back inferida sin registros extras', () => {
 
   const withRealBack = makePixels(3, 2, () => [0, 0, 255, 255]);
   const recordsWithBack = [
-    { name: 'hero.png', canvas: source, role: 'front' },
-    { name: 'hero-back.png', canvas: withRealBack, role: 'back' },
+    { name: 'hero.png', canvas: source, back: withRealBack },
   ];
   const manifestWithBack = Batch.createManifest(recordsWithBack, { depth: 2, inferenceEnabled: true }, { c: 1, r: 1 }, {
     readPixels: value => value, clone: structuredClone, alignmentFor: () => ({}),
@@ -4089,8 +3983,64 @@ test('mesh.lod medium selects medium LOD and keeps high as default list', () => 
   const pixels = makePixels(4, 4, (x, y) => [x * 17, y * 17, 128, 255]);
   const config = Voxel.createDefaultConfig();
   config.depth.layers = 4;
-  config.mesh.lod = 'medium';
-  const result = Voxel.voxelize(pixels, config, {});
-  assert.equal(result.selectedLod, 'medium');
-  assert.ok(result.lodFaces.medium.length < result.lodFaces.high.length);
+   config.mesh.lod = 'medium';
+   const result = Voxel.voxelize(pixels, config, {});
+   assert.equal(result.selectedLod, 'medium');
+   assert.ok(result.lodFaces.medium.length < result.lodFaces.high.length);
+});
+
+test('staff at edge survives strict mode with mirrored back view', () => {
+  // Simulates user's case: staff at x=8 in front, mirrored to x=1 in back
+  // Only front+back views, strict mode (default)
+  const { Voxel } = loadRuntime();
+  const W = 10, H = 10;
+  const front = makePixels(W, H, (x, y) => {
+    const body = x >= 2 && x <= 7 && y >= 2 && y <= 7;
+    const staff = x === 8 && y >= 2 && y <= 7;
+    return (body || staff) ? [200, 100, 50, 255] : [0, 0, 0, 0];
+  });
+  // Back is horizontally mirrored: staff at x=1 (mirrored from x=8), body mirrored too
+  const back = makePixels(W, H, (x, y) => {
+    const mirrorX = (W - 1) - x;
+    const body = mirrorX >= 2 && mirrorX <= 7 && y >= 2 && y <= 7;
+    const staff = mirrorX === 8 && y >= 2 && y <= 7;
+    return (body || staff) ? [150, 80, 40, 255] : [0, 0, 0, 0];
+  });
+  const config = Voxel.createDefaultConfig();
+  config.material.enabled = false;
+  config.depth.layers = 2;
+  config.reconstruction.mode = 'strict';
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  // Front: body x=2..7 (6 cols) × y=2..7 (6 rows) = 36, staff x=8 × 6 rows = 6 => 42 pixels × 2 layers = 84
+  const bodyOnly = 6 * 6 * 2; // 72
+  assert.ok(result.voxels > bodyOnly, `should include staff voxels, got ${result.voxels} > ${bodyOnly}`);
+  // Verify staff column has voxels at middle y
+  const midY = H - 1 - 5; // y=5 in screen coords
+  const staffIndex = 8 + W * (midY + H * 1); // x=8, z=1
+  assert.ok(result.grid[staffIndex] >= 0, `staff voxel should exist at x=8, y=5, z=1`);
+});
+
+test('staff disappears when back image is not a true mirror (asymmetric alpha)', () => {
+  // Regression: back image may not perfectly mirror front's alpha for thin features
+  const { Voxel } = loadRuntime();
+  const W = 10, H = 10;
+  const front = makePixels(W, H, (x, y) => {
+    const body = x >= 2 && x <= 7 && y >= 2 && y <= 7;
+    const staff = x === 8 && y >= 2 && y <= 7;
+    return (body || staff) ? [200, 100, 50, 255] : [0, 0, 0, 0];
+  });
+  // Back has body but staff column is missing (simulates wrong mirroring or low alpha)
+  const back = makePixels(W, H, (x, y) => {
+    const mirrorX = (W - 1) - x;
+    const body = mirrorX >= 2 && mirrorX <= 7 && y >= 2 && y <= 7;
+    return body ? [150, 80, 40, 255] : [0, 0, 0, 0];
+  });
+  const config = Voxel.createDefaultConfig();
+  config.material.enabled = false;
+  config.depth.layers = 2;
+  config.reconstruction.mode = 'strict';
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  // Staff should be killed by strict mode because back has no alpha at x=1
+  const bodyOnly = 6 * 6 * 2; // 72
+  assert.ok(result.voxels <= bodyOnly, `staff should be filtered out, got ${result.voxels}`);
 });

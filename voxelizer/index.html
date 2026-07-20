@@ -110,17 +110,11 @@ body{
 .st.queued{color:var(--dim);background:var(--bg4)}
 .st.progress{color:var(--accent);background:rgba(255,149,87,.12)}
 .st.err{color:#ff8f8f;background:rgba(255,96,96,.12)}
-.item .role{
-  margin-top:4px;background:var(--bg3);border:1px solid var(--line2);color:var(--dim);
-  border-radius:4px;padding:2px 5px;font-size:10px;width:100%;cursor:pointer;
+.item .del-item{
+  background:none;border:0;color:var(--dim2);cursor:pointer;font-size:16px;
+  padding:0 5px;border-radius:4px;line-height:1;flex:0 0 auto;transition:.12s;
 }
-.item .role:disabled{
-  opacity:.55;cursor:not-allowed;background:var(--bg4);
-}
-.item .role:focus{outline:none;border-color:var(--sel)}
-.item .role-hint{
-  display:block;margin-top:2px;font-size:9px;color:var(--dim2);white-space:nowrap;
-}
+.item .del-item:hover{color:#ff6b6b;background:rgba(255,0,0,.12)}
 
 /* ---------- viewport ---------- */
 .vp-toolbar{
@@ -461,12 +455,20 @@ input[type=range]:focus-visible,
         <div class="grp">
           <div class="sec-h"><span>Multi-vista</span><span class="count">opcional</span></div>
           <div class="ctl">
-            <div style="display:flex;gap:8px">
+            <div style="display:flex;gap:6px;margin-bottom:6px">
+              <div id="slotFront" class="vslot set" role="status" aria-label="Vista frontal" style="cursor:default"><span>Frontal</span></div>
+              <div id="slotBack" class="vslot" role="button" tabindex="0" aria-label="Añadir vista trasera">Trasera<span>+ añadir</span></div>
+              <div id="slotLeft" class="vslot" role="button" tabindex="0" aria-label="Añadir vista izquierda">Izquierda<span>+ añadir</span></div>
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:6px">
+              <div id="slotRight" class="vslot" role="button" tabindex="0" aria-label="Añadir vista derecha">Derecha<span>+ añadir</span></div>
               <div id="slotSide" class="vslot" role="button" tabindex="0" aria-label="Añadir vista de perfil">Perfil<span>+ añadir</span></div>
               <div id="slotTop" class="vslot" role="button" tabindex="0" aria-label="Añadir vista cenital">Cenital<span>+ añadir</span></div>
+            </div>
+            <div style="display:flex;gap:6px">
               <div id="slotDepth" class="vslot" role="button" tabindex="0" aria-label="Añadir mapa de profundidad">Depth<span>+ añadir</span></div>
             </div>
-            <div class="hint" style="text-align:left;margin-top:6px">Ejes ortográficos: frontal X/Y, perfil Z/Y y cenital X/Z. Las vistas que coinciden con el spritesheet se asocian por frame; otras permanecen estáticas.</div>
+            <div class="hint" style="text-align:left;margin-top:8px">Las vistas adicionales (trasera, izquierda, derecha, perfil, cenital) se usan para fusionar color en caras múltiples. Perfil también sirve para calibración de profundidad.</div>
             <div class="row" style="margin-top:9px"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
             <div class="hint" id="inferenceHint" style="text-align:left">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
             <details class="adv-panel" id="advancedFusion">
@@ -541,6 +543,9 @@ input[type=range]:focus-visible,
             <div class="diagnostics" id="diagnostics" aria-live="polite"><p>Sin diagnósticos todavía.</p></div>
           </div>
         </div>
+        <input type="file" id="fileBack" accept="image/*" style="display:none">
+        <input type="file" id="fileLeft" accept="image/*" style="display:none">
+        <input type="file" id="fileRight" accept="image/*" style="display:none">
         <input type="file" id="fileSide" accept="image/*" style="display:none">
         <input type="file" id="fileTop" accept="image/*" style="display:none">
         <input type="file" id="fileDepth" accept="image/*" style="display:none">

@@ -15,9 +15,6 @@
     const value = String(name || 'item').replace(/\\/g, '/').split('/').pop().replace(/\.[a-z0-9]+$/i, '') || 'item';
     return value.replace(/[\x00-\x1f<>:"/\\|?*]+/g, '_');
   }
-  function modelBaseName(name) {
-    return baseName(name).replace(/-(front|back|left|right|top)$/, '');
-  }
   function viewRole(kind) {
     return kind === 'depthMap' ? 'depthmap' : kind;
   }
@@ -76,18 +73,9 @@
     const alignmentFor = adapters.alignmentFor || (() => ({}));
     const records = [...sourceItems];
     const frames = frameCount(sheet);
-    const siblingMap = new Map();
-    for (const record of records) {
-      const role = record.role || 'front';
-      if (role === 'front') continue;
-      const base = modelBaseName(record.name);
-      if (!siblingMap.has(base)) siblingMap.set(base, []);
-      siblingMap.get(base).push({ record, role });
-    }
-    const frontRecords = records.filter(record => (record.role || 'front') === 'front');
-    const totalJobs = frontRecords.length * frames;
+    const totalJobs = records.length * frames;
     if (totalJobs > MAX_BATCH_JOBS) throw budgetError('BATCH_JOB_BUDGET_EXCEEDED', `Batch has ${totalJobs} jobs; maximum is ${MAX_BATCH_JOBS}`);
-    const bases = allocateBaseNames(frontRecords.map(record => record.name));
+    const bases = allocateBaseNames(records.map(record => record.name));
     let inputBytes = 0, expectedOutputBytes = 0;
     const snapshotPixels = (value, label) => {
       const pixels = readPixels(value);
@@ -99,16 +87,11 @@
       return clone(pixels);
     };
     const depth = Math.max(1, ((opts.depth && opts.depth.layers) || opts.depth || 1) | 0);
-    const snapshots = frontRecords.map((record, index) => {
+    const snapshots = records.map((record, index) => {
       const source = snapshotPixels(record.canvas, `${record.name} source`);
       const viewSnapshots = {};
-      for (const kind of ['side', 'top', 'depthMap']) if (record[kind]) {
-        viewSnapshots[kind] = snapshotPixels(record[kind], `${record.name} ${kind}`);
-      }
-      const siblings = siblingMap.get(modelBaseName(record.name)) || [];
-      for (const { record: sibling, role } of siblings) {
-        if (viewSnapshots[role]) continue;
-        viewSnapshots[role] = snapshotPixels(sibling.canvas, `${sibling.name} ${role}`);
+      for (const kind of ['back', 'left', 'right', 'side', 'top', 'depthMap']) {
+        if (record[kind]) viewSnapshots[kind] = snapshotPixels(record[kind], `${record.name} ${kind}`);
       }
       if (opts.inferenceEnabled && !viewSnapshots.back) {
         viewSnapshots.back = _mirrorBack(source);
