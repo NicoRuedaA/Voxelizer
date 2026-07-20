@@ -69,6 +69,5 @@ This release marks a major overhaul of the core engine, focusing on stability, p
 
 ### `v0.4.0` - Initial Public Version
 
-*   Base version by [GazPrash](https://github.com/GazPrash).
 *   Core functionality: 2D image to 3D model via extrusion.
 *   Features: Greedy Meshing, palette quantization, and OBJ/VOX export.
