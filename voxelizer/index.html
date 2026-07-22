@@ -407,6 +407,8 @@ input[type=range]:focus-visible,
             <div class="row"><span class="lbl">Profundidad <span class="flag">--depth</span></span><span><button type="button" class="mini-reset" id="matchProfileDepth" disabled>Match profile</button> <span class="val" id="vDepth">6</span></span></div>
             <input type="range" id="depth" min="1" max="256" step="1" value="6">
             <div class="hint" id="matchProfileHint" style="text-align:left">Add a calibrated profile view to match its selected frame width.</div>
+            <div class="row" style="margin-top:7px"><span class="lbl">Usar silueta opaca</span><button type="button" class="toggle on" id="useSilhouetteDepth" aria-label="Calcular profundidad desde la silueta opaca en lugar del lienzo completo" aria-pressed="true"></button></div>
+            <div class="hint" id="silhouetteInfo" style="text-align:left">Cuando está activo, usa la anchura real de la silueta para la profundidad. Desactívalo para usar el ancho del lienzo completo.</div>
             <details class="adv-panel" id="advancedReconstruction">
               <summary>Reconstrucción avanzada</summary>
               <div class="row" style="margin-top:11px"><span class="lbl">Modo de relieve</span><button type="button" class="mini-reset" id="resetDepthProfile">Restablecer</button></div>

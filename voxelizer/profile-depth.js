@@ -26,26 +26,52 @@
     return typed && data.length === w * h * 4;
   }
 
-  function matchSideDepth(views, maximum) {
+  // Standalone opaque bounds (duplicated from voxel.js to avoid dependency)
+  function _opaqueBounds(pixels, alphaThreshold) {
+    if (!pixels || !pixels.w || !pixels.h) return null;
+    const thresh = alphaThreshold || 40;
+    let minX = pixels.w, minY = pixels.h, maxX = -1, maxY = -1;
+    for (let y = 0; y < pixels.h; y++) {
+      for (let x = 0; x < pixels.w; x++) {
+        const alpha = pixels.data[(x + y * pixels.w) * 4 + 3];
+        if (alpha > thresh) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0 || maxY < 0) return null;
+    return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 };
+  }
+
+  function matchSideDepth(views, maximum, useSilhouetteDepth) {
     const descriptors = views && Array.isArray(views.views) ? views.views : [];
     const side = descriptors.find(view => view && view.role === 'side');
     if (!side) return { enabled: false, depth: null, sourceWidth: null, clamped: false, status: STATUS.NO_SIDE_VIEW };
     if (!validRgbaPixels(side.pixels)) {
       return { enabled: false, depth: null, sourceWidth: null, clamped: false, status: STATUS.INVALID_SIDE_PIXELS };
     }
-    const depth = clampDepth(side.pixels.w, maximum);
-    const clamped = depth !== side.pixels.w;
+    // Calculate opaque silhouette width
+    const bounds = _opaqueBounds(side.pixels, 40);
+    const opaqueWidth = bounds ? bounds.width : null;
+    // Use opaque silhouette width when available and useSilhouetteDepth is true
+    const effectiveWidth = (opaqueWidth != null && useSilhouetteDepth !== false) ? opaqueWidth : side.pixels.w;
+    const depth = clampDepth(effectiveWidth, maximum);
+    const clamped = depth !== effectiveWidth;
     return {
       enabled: true,
       depth,
       sourceWidth: side.pixels.w,
+      opaqueWidth,
       clamped,
       status: clamped ? STATUS.CLAMPED : STATUS.READY,
     };
   }
 
-  function actionState(views, maximum, activity) {
-    const match = matchSideDepth(views, maximum);
+  function actionState(views, maximum, activity, useSilhouetteDepth) {
+    const match = matchSideDepth(views, maximum, useSilhouetteDepth);
     const busy = !!(activity && (activity.previewBusy || activity.batchBusy));
     return { ...match, busy, disabled: busy || !match.enabled };
   }

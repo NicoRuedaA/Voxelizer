@@ -457,6 +457,26 @@ function _assertVoxelBudget(w, h, depth) {
   return count;
 }
 
+// ---- opaque bounds (silhouette BBox) ----
+function opaqueBounds(pixels, alphaThreshold) {
+  if (!pixels || !pixels.w || !pixels.h) return null;
+  const thresh = alphaThreshold || 40;
+  let minX = pixels.w, minY = pixels.h, maxX = -1, maxY = -1;
+  for (let y = 0; y < pixels.h; y++) {
+    for (let x = 0; x < pixels.w; x++) {
+      const alpha = pixels.data[(x + y * pixels.w) * 4 + 3];
+      if (alpha > thresh) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0 || maxY < 0) return null;
+  return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
 function _binaryMorph(mask, w, h, radius, dilate) {
   if (!radius) return new Uint8Array(mask);
   const out = new Uint8Array(w * h);
@@ -2365,6 +2385,7 @@ voxelRoot.Voxel = {
   prepareSilhouettes,
   transformViews,
   normalizeViewInputs,
+  opaqueBounds,
   _landmarkTransform,
   _forwardTransformPoint,
   _viewSample,

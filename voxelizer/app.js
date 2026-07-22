@@ -27,7 +27,7 @@
     pixels: null,        // current {w,h,data} (single frame, after sheet slice)
     sourceCanvas: null,  // full source canvas (pre-slice)
     name: '—',
-    opts: { ...defaultOpts, alignment: cloneData(defaultAlignment) },
+    opts: { ...defaultOpts, useSilhouetteDepth: true, alignment: cloneData(defaultAlignment) },
     sheet: { c: 1, r: 1, frame: 0 },
     views: { side: null, top: null, depthMap: null },   // optional canvases for the active record
     showWire: false, showGrid: false,
@@ -544,15 +544,18 @@
     return VoxelProfileDepth.actionState(views, Voxel.MAX_DEPTH_LAYERS, {
       previewBusy: state.busy,
       batchBusy: state.batchBusy,
-    });
+    }, state.opts.useSilhouetteDepth);
   }
 
   function profileDepthMessage(match) {
     if (match.busy) return 'Wait for the current preview or batch before matching depth.';
     if (match.status === VoxelProfileDepth.STATUS.NO_SIDE_VIEW) return 'Add a calibrated profile view to match its selected frame width.';
     if (match.status === VoxelProfileDepth.STATUS.INVALID_SIDE_PIXELS) return 'The selected profile frame is not a valid RGBA pixel payload.';
-    if (match.clamped) return `The selected profile frame is ${match.sourceWidth}px wide and is limited to ${match.depth} layers.`;
-    return `Use ${match.depth} layers: one depth layer per source pixel in the selected profile frame, before alignment or resampling.`;
+    const widthInfo = (match.opaqueWidth != null && match.opaqueWidth !== match.sourceWidth)
+      ? ` (silueta: ${match.opaqueWidth}px, lienzo: ${match.sourceWidth}px)`
+      : ` (${match.sourceWidth}px)`;
+    if (match.clamped) return `The selected profile frame is ${match.sourceWidth}px wide${widthInfo} and is limited to ${match.depth} layers.`;
+    return `Use ${match.depth} layers: one depth layer per source pixel in the selected profile frame, before alignment or resampling.${widthInfo}`;
   }
 
   function updateMatchProfileAction() {
@@ -562,6 +565,15 @@
     button.disabled = match.disabled;
     button.title = message;
     $('matchProfileHint').textContent = message;
+    // Update silhouette info
+    const si = $('silhouetteInfo');
+    if (match.opaqueWidth != null) {
+      si.textContent = `Silueta detectada: ${match.opaqueWidth}px. Lienzo: ${match.sourceWidth}px. Profundidad: ${match.depth} capas.`;
+      si.style.color = match.opaqueWidth < match.sourceWidth ? 'var(--accent)' : 'var(--dim2)';
+    } else {
+      si.textContent = 'Sin vista de perfil cargada.';
+      si.style.color = 'var(--dim2)';
+    }
     return match;
   }
 
@@ -1277,6 +1289,7 @@
   slider('materialStrength', 'vMaterialStrength', v => state.opts.materialStrength = v / 100, v => `${v}%`);
   toggle('invertDepthMap', on => state.opts.invertDepthMap = on);
   toggle('localWidthAware', on => state.opts.localWidthAware = on);
+  toggle('useSilhouetteDepth', on => { state.opts.useSilhouetteDepth = on; updateMatchProfileAction(); recompute(); });
   [['sideFollowsSheet', 'side'], ['topFollowsSheet', 'top'], ['depthMapFollowsSheet', 'depthMap']].forEach(([id, kind]) => {
     toggle(id, on => {
       const rec = activeRecord();
