@@ -27,7 +27,7 @@ const MAX_TRANSFORMED_VIEW_BYTES = 128 * 1024 * 1024;
 const NO_MATERIAL = 255;
 const MATERIAL_CONFIG_KEYS = ['enabled', 'tolerance', 'strength'];
 const RESAMPLING_MODES = ['nearest', 'area', 'bilinear'];
-const RECONSTRUCTION_MODES = ['strict', 'weighted'];
+const RECONSTRUCTION_MODES = ['strict', 'weighted', 'preserve-front'];
 const DEPTH_VOLUME_MODES = ['symmetric', 'asymmetric', 'depthmap'];
 const DEPTH_PROFILE_MODES = ['uniform', 'dt', 'poisson', 'sfs', 'combo', 'humanoid'];
 const MESH_MODES = ['voxel'];
@@ -475,6 +475,90 @@ function opaqueBounds(pixels, alphaThreshold) {
   }
   if (maxX < 0 || maxY < 0) return null;
   return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+// ---- connected components (front mask) ----
+function findConnectedComponents(mask, w, h) {
+  if (!mask || !w || !h) return [];
+  const visited = new Uint8Array(mask.length);
+  const components = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = x + w * y;
+      if (!mask[i] || visited[i]) continue;
+      // Flood fill this component
+      const pixels = [];
+      const queue = [i];
+      visited[i] = 1;
+      let minX = w, minY = h, maxX = -1, maxY = -1;
+      while (queue.length) {
+        const ci = queue.pop();
+        const cx = ci % w, cy = (ci / w) | 0;
+        pixels.push(ci);
+        if (cx < minX) minX = cx;
+        if (cy < minY) minY = cy;
+        if (cx > maxX) maxX = cx;
+        if (cy > maxY) maxY = cy;
+        // 4-connected neighbors
+        const neighbors = [
+          cx > 0 ? ci - 1 : -1,
+          cx + 1 < w ? ci + 1 : -1,
+          cy > 0 ? ci - w : -1,
+          cy + 1 < h ? ci + w : -1,
+        ];
+        for (const n of neighbors) {
+          if (n >= 0 && mask[n] && !visited[n]) {
+            visited[n] = 1;
+            queue.push(n);
+          }
+        }
+      }
+      const cw = maxX - minX + 1;
+      const ch = maxY - minY + 1;
+      components.push({
+        id: components.length,
+        minX, minY, maxX, maxY,
+        width: cw, height: ch,
+        area: pixels.length,
+        pixels,
+      });
+    }
+  }
+  return components;
+}
+
+// ---- detect thin/edge features for preserve-front mode ----
+// Columns that are "exposed" (have occupied neighbors on only one side)
+// are preserved by the front view even if auxiliary views differ.
+// This includes both thin protrusions (staff) and body edges.
+function buildThinComponentMap(quant) {
+  const { idxAt, w, h } = quant;
+  const thinMask = new Uint8Array(w * h);
+  // For each column, find vertical runs and check horizontal exposure
+  for (let x = 0; x < w; x++) {
+    let startY = -1;
+    for (let y = 0; y <= h; y++) {
+      const occ = y < h && idxAt[x + w * y] >= 0;
+      if (occ && startY < 0) startY = y;
+      else if (!occ && startY >= 0) {
+        const spanHeight = y - startY;
+        if (spanHeight >= 3) {
+          // Check if this column has neighbors on both sides
+          let leftAny = false, rightAny = false;
+          for (let sy = startY; sy < y && !(leftAny && rightAny); sy++) {
+            if (x > 0 && idxAt[(x - 1) + w * sy] >= 0) leftAny = true;
+            if (x + 1 < w && idxAt[(x + 1) + w * sy] >= 0) rightAny = true;
+          }
+          // Only one side has neighbors = exposed edge = preserve it
+          if (leftAny !== rightAny) {
+            for (let sy = startY; sy < y; sy++) thinMask[x + w * sy] = 1;
+          }
+        }
+        startY = -1;
+      }
+    }
+  }
+  return { thinMask };
 }
 
 function _binaryMorph(mask, w, h, radius, dilate) {
@@ -1763,6 +1847,12 @@ function buildHull(quant, depthState, silhouettes, config, material) {
     material.acceptedMaxZ = new Int16Array(material.clusterCount).fill(-1);
   }
   let voxels = 0;
+  // Pre-compute thin component mask for preserve-front mode
+  let thinMask = null;
+  if (config.reconstruction.mode === 'preserve-front') {
+    const result = buildThinComponentMap(quant);
+    thinMask = result.thinMask;
+  }
   for (let py = 0; py < H; py++) {
     for (let px = 0; px < W; px++) {
       const i = px + W * py;
@@ -1782,6 +1872,14 @@ function buildHull(quant, depthState, silhouettes, config, material) {
         let accepted = true;
         if (config.reconstruction.mode === 'strict') {
           for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
+        } else if (config.reconstruction.mode === 'preserve-front') {
+          // For thin components (staff, accessories), accept based on front alone
+          if (thinMask && thinMask[i]) {
+            accepted = true;
+          } else {
+            // For body pixels, use strict silhouette intersection
+            for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
+          }
         } else {
           let score = frontColor >= 0 ? config.reconstruction.frontWeight : 0, total = config.reconstruction.frontWeight;
           for (const view of silhouettes.prepared) {
@@ -1809,7 +1907,8 @@ function buildHull(quant, depthState, silhouettes, config, material) {
   return { grid, dims: [W, H, D], voxels, material };
 }
 function calculateOccupancy(quant, config, silhouettes, depthState, material) {
-  const useHull = silhouettes.prepared.length > 0 || config.reconstruction.mode === 'weighted';
+  const useHull = silhouettes.prepared.length > 0 || config.reconstruction.mode === 'weighted'
+    || config.reconstruction.mode === 'preserve-front';
   const occupancy = useHull ? buildHull(quant, depthState, silhouettes, config, material) : buildGrid(quant, depthState);
   occupancy.material = material;
   return occupancy;
@@ -2377,12 +2476,7 @@ function annotateAO(faces, grid, dims, strength) {
 
 const voxelRoot = (typeof window !== 'undefined') ? window : globalThis;
 voxelRoot.Voxel = {
-  CONFIG_VERSION,
-  MAX_DEPTH_LAYERS,
-  MAX_VOXEL_COUNT,
-  CANONICAL_ORIENTATIONS,
-  LOD_LEVELS,
-  canvasToPixels,
+  RECONSTRUCTION_MODES,
   validatePixels,
   preprocessPixels,
   createDefaultConfig,
@@ -2392,6 +2486,9 @@ voxelRoot.Voxel = {
   normalizeConfig,
   inferViews,
   autoAlignViews,
+  opaqueBounds,
+  findConnectedComponents,
+  buildThinComponentMap,
   _maskBounds,
   prepareSilhouettes,
   transformViews,

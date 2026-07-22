@@ -4163,3 +4163,27 @@ test('staff survives with inferred back view (mirrored)', () => {
   assert.ok(result.grid[staffIndex] >= 0, `staff voxel should exist at x=8, y=5, z=1`);
 });
 
+test('preserve-front mode keeps thin components even with mismatched back view', () => {
+  const { Voxel } = loadRuntime();
+  const W = 10, H = 10;
+  const front = makePixels(W, H, (x, y) => {
+    const body = x >= 2 && x <= 7 && y >= 2 && y <= 7;
+    const staff = x === 8 && y >= 2 && y <= 7;
+    return (body || staff) ? [200, 100, 50, 255] : [0, 0, 0, 0];
+  });
+  const back = makePixels(W, H, (x, y) => {
+    const mirrorX = (W - 1) - x;
+    const body = mirrorX >= 2 && mirrorX <= 7 && y >= 2 && y <= 7;
+    return body ? [150, 80, 40, 255] : [0, 0, 0, 0];
+  });
+  const config = Voxel.createDefaultConfig();
+  config.material.enabled = false;
+  config.depth.layers = 2;
+  config.reconstruction.mode = 'preserve-front';
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back, inferred: true }] });
+  const midY = H - 1 - 5;
+  const staffIndex = 8 + W * (midY + H * 1);
+  assert.ok(result.grid[staffIndex] >= 0, 'preserve-front keeps staff without back support');
+  assert.ok(result.voxels >= 84, `should have all front voxels, got ${result.voxels}`);
+});
+

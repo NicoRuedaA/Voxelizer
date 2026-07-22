@@ -479,7 +479,8 @@ input[type=range]:focus-visible,
             </div>
             <details class="adv-panel" id="advancedFusion">
               <summary>Fusión y confianza</summary>
-              <div class="seg" id="reconstructionModeSeg" style="margin-top:10px"><button data-reconstruction="strict" class="on">Estricto</button><button data-reconstruction="weighted">Ponderado</button></div>
+              <div class="seg" id="reconstructionModeSeg" style="margin-top:10px"><button data-reconstruction="strict" class="on">Estricto</button><button data-reconstruction="weighted">Ponderado</button><button data-reconstruction="preserve-front">Preservar frontal</button></div>
+              <div class="hint" id="reconstructionModeHint" style="text-align:left;margin-top:4px">Estricto = todas las vistas deben coincidir. Ponderado = suma ponderada por confianza. Preservar frontal = las vistas adicionales refinan el cuerpo pero los accesorios finos (báculos, espadas) se conservan aunque no aparezcan en todas las proyecciones.</div>
               <div class="row" style="margin-top:9px"><span class="lbl">Threshold</span><span class="val" id="vReconThreshold">100%</span></div>
               <input type="range" id="reconThreshold" min="0" max="100" value="100">
               <div class="row" style="margin-top:9px"><span class="lbl">Tolerancia de borde</span><span class="val" id="vEdgeTolerance">0%</span></div>
