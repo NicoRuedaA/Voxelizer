@@ -351,7 +351,7 @@ input[type=range]:focus-visible,
     <div class="appname"><b>VOX</b>ELIZER</div>
     <div class="menu"><span>File</span><span>Edit</span><span>Batch</span><span>View</span><span>Help</span></div>
     <div class="tb-spacer"></div>
-    <div class="ver">v0.4 · sprite→voxel</div>
+    <div class="ver">v0.5.0 · sprite→voxel</div>
   </div>
 
   <div class="body">
@@ -469,8 +469,10 @@ input[type=range]:focus-visible,
               <div id="slotDepth" class="vslot" role="button" tabindex="0" aria-label="Añadir mapa de profundidad">Depth<span>+ añadir</span></div>
             </div>
             <div class="hint" style="text-align:left;margin-top:8px">Las vistas adicionales (trasera, izquierda, derecha, perfil, cenital) se usan para fusionar color en caras múltiples. Perfil también sirve para calibración de profundidad.</div>
-            <div class="row" style="margin-top:9px"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
-            <div class="hint" id="inferenceHint" style="text-align:left">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
+              <div class="hint" id="inferenceHint" style="text-align:left">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Inferir solo trasera</span><button type="button" class="toggle" id="inferenceBack" aria-pressed="false"></button></div>
+              <div class="hint" id="inferenceBackHint" style="text-align:left">Cuando está activo, solo infiere la vista trasera (ignora perfil/cenital). Útil para sprites front+back.</div>
             <details class="adv-panel" id="advancedFusion">
               <summary>Fusión y confianza</summary>
               <div class="seg" id="reconstructionModeSeg" style="margin-top:10px"><button data-reconstruction="strict" class="on">Estricto</button><button data-reconstruction="weighted">Ponderado</button></div>
@@ -478,6 +480,8 @@ input[type=range]:focus-visible,
               <input type="range" id="reconThreshold" min="0" max="100" value="100">
               <div class="row" style="margin-top:9px"><span class="lbl">Tolerancia de borde</span><span class="val" id="vEdgeTolerance">0%</span></div>
               <input type="range" id="edgeTolerance" min="0" max="100" value="0">
+              <div class="row" style="margin-top:9px"><span class="lbl">Peso frontal</span><span class="val" id="vFrontWeight">100%</span></div>
+              <input type="range" id="frontWeight" min="0" max="400" value="100">
               <div class="row" style="margin-top:9px"><span class="lbl">Peso perfil</span><span class="val" id="vSideWeight">100%</span></div>
               <input type="range" id="sideWeight" min="0" max="400" value="100">
               <div class="row" style="margin-top:9px"><span class="lbl">Peso cenital</span><span class="val" id="vTopWeight">100%</span></div>
@@ -587,6 +591,14 @@ input[type=range]:focus-visible,
             <input type="range" id="colors" min="2" max="64" value="32">
             <div class="row" style="margin-top:11px"><span class="lbl">Color de superficies</span></div>
             <div class="seg" id="colorModeSeg"><button data-color="front" class="on">Solo frontal</button><button data-color="auxiliary">Fusionar vistas</button></div>
+            <div id="colorPolicyControls" style="display:none">
+              <div class="row" style="margin-top:9px"><span class="lbl">Política lateral</span></div>
+              <div class="seg" id="colorSideSeg"><button data-side="front" class="on">Frontal</button><button data-side="auxiliary">Auxiliar</button></div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Política trasera</span></div>
+              <div class="seg" id="colorBackSeg"><button data-back="front" class="on">Frontal</button><button data-back="darken">Oscurecer</button><button data-back="auxiliary">Auxiliar</button></div>
+              <div class="row" style="margin-top:9px"><span class="lbl">Factor oscurecimiento</span><span class="val" id="vDarken">72%</span></div>
+              <input type="range" id="darken" min="0" max="100" value="72">
+            </div>
             <div class="row" style="margin-top:11px"><span class="lbl">Editor de paleta</span></div>
             <div class="align-actions" style="margin-top:8px">
               <button type="button" class="mini-reset" id="importPaletteBtn">Importar</button>
@@ -612,6 +624,9 @@ input[type=range]:focus-visible,
             <input type="range" id="aoStr" min="0" max="100" value="80" style="display:none">
             <div class="row" style="margin-top:11px"><span class="lbl">Escala voxel <span class="flag">--scale</span></span><span class="val" id="vScale">1.0</span></div>
             <input type="range" id="scale" min="1" max="40" value="10">
+            <div class="row" style="margin-top:11px"><span class="lbl">Nivel de detalle</span></div>
+            <div class="seg" id="lodSeg"><button data-lod="high" class="on">Alto</button><button data-lod="medium">Medio</button><button data-lod="low">Bajo</button></div>
+            <div class="hint" style="text-align:left">Reduce geometría para motores de juego. Alto = 1x, Medio = 2x, Bajo = 4x.</div>
           </div>
         </div>
 

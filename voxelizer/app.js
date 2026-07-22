@@ -1271,6 +1271,7 @@
   slider('aoStr', 'vAoStr', v => state.opts.aoStrength = v / 100, v => v + '%');
   toggle('silhouetteEnabled', on => state.opts.silhouetteEnabled = on);
   toggle('inferenceEnabled', on => state.opts.inferenceEnabled = on);
+  toggle('inferenceBack', on => state.opts.inferenceBack = on);
   slider('denoiseRadius', 'vDenoiseRadius', v => state.opts.denoiseRadius = v, v => `${v} px`);
   slider('closeRadius', 'vCloseRadius', v => state.opts.closeRadius = v, v => `${v} px`);
   slider('feather', 'vFeather', v => state.opts.feather = v / 100, v => `${v}%`);
@@ -1292,6 +1293,7 @@
   });
   slider('reconThreshold', 'vReconThreshold', v => state.opts.reconstructionThreshold = v / 100, v => `${v}%`);
   slider('edgeTolerance', 'vEdgeTolerance', v => state.opts.edgeTolerance = v / 100, v => `${v}%`);
+  slider('frontWeight', 'vFrontWeight', v => state.opts.frontWeight = v / 100, v => `${v}%`);
   slider('sideWeight', 'vSideWeight', v => state.opts.sideWeight = v / 100, v => `${v}%`);
   slider('topWeight', 'vTopWeight', v => state.opts.topWeight = v / 100, v => `${v}%`);
   slider('frontRatio', 'vFrontRatio', v => state.opts.frontRatio = v / 100, v => `${v}%`);
@@ -1309,6 +1311,23 @@
   [...$('colorModeSeg').children].forEach(button => button.addEventListener('click', () => {
     state.opts.colorMode = button.dataset.color;
     [...$('colorModeSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    $('colorPolicyControls').style.display = button.dataset.color === 'auxiliary' ? '' : 'none';
+    recompute();
+  }));
+  [...$('colorSideSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.colorSide = button.dataset.side;
+    [...$('colorSideSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    recompute();
+  }));
+  [...$('colorBackSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.colorBack = button.dataset.back;
+    [...$('colorBackSeg').children].forEach(item => item.classList.toggle('on', item === button));
+    recompute();
+  }));
+  slider('darken', 'vDarken', v => state.opts.darken = v / 100, v => `${v}%`);
+  [...$('lodSeg').children].forEach(button => button.addEventListener('click', () => {
+    state.opts.lod = button.dataset.lod;
+    [...$('lodSeg').children].forEach(item => item.classList.toggle('on', item === button));
     recompute();
   }));
 

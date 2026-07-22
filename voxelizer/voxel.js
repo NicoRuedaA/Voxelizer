@@ -216,6 +216,7 @@ function _legacyPatch(input) {
   if ('backColorMode' in input) patch.color = { ...(patch.color || {}), back: input.backColorMode };
   if ('colorDarken' in input) patch.color = { ...(patch.color || {}), darken: input.colorDarken };
   if ('inferenceEnabled' in input) patch.inference = { ...(patch.inference || {}), enabled: input.inferenceEnabled };
+  if ('inferenceBack' in input) patch.inference = { ...(patch.inference || {}), back: input.inferenceBack };
   return patch;
 }
 function _normalizeViewTransform(input) {
@@ -376,6 +377,7 @@ function legacyOptionsFromConfig(input) {
     backColorMode: config.color.back,
     colorDarken: config.color.darken,
     inferenceEnabled: config.inference.enabled,
+    inferenceBack: config.inference.back,
   };
 }
 function defaultLegacyOptions() {

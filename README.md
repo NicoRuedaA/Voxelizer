@@ -1,7 +1,7 @@
 # Voxelizer v0.5 — Professional 2D to 3D Voxel Converter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-202%2F202%20passing-brightgreen)](tests/voxelizer.test.js)
+[![Tests](https://img.shields.io/badge/tests-205%2F205%20passing-brightgreen)](tests/voxelizer.test.js)
 [![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
 
 An advanced, robust, and predictable tool for converting 2D pixel art into high-quality 3D voxel models, designed for artists and game developers.
@@ -31,7 +31,30 @@ Voxelizer follows a sophisticated pipeline to ensure high-quality results:
 2.  **Volume Extrusion**: This mask is then extruded along the Z-axis to create the initial, dense cloud of voxels.
 3.  **Greedy Meshing**: This is the secret sauce. The algorithm sweeps through the voxel cloud and merges adjacent faces into large, optimized polygons, dramatically reducing geometric complexity.
 4.  **Camera Projection**: The 3D model is rendered to the screen using precise **Model-View-Projection** matrix transformations. Our remediation work ensures the orthographic projection parameters are mathematically sound, providing a stable, what-you-see-is-what-you-get experience.
-5.  **Quality Assured**: The entire core logic is backed by a suite of **178 regression tests**, ensuring every feature, from camera controls to memory budgeting, is stable and predictable.
+5.  **Quality Assured**: The entire core logic is backed by a suite of **205 regression tests**, ensuring every feature, from camera controls to memory budgeting, is stable and predictable.
+
+## 🚀 Quick Start
+
+Since Voxelizer uses Web Workers for performance, you need to serve it via HTTP (not `file://`).
+
+**Option 1: Using npm (recommended)**
+```bash
+npm install
+npm run dev
+```
+
+**Option 2: Using Python**
+```bash
+python3 -m http.server 8080
+```
+
+**Option 3: Any static server**
+```bash
+# Using npx with any static server
+npx serve .
+```
+
+Then open **http://localhost:8080/voxelizer/** in your browser.
 
 ## 👨‍💻 Development
 
@@ -39,11 +62,13 @@ This project is developed using **Spec-Driven Development (SDD)** to ensure that
 
 *   To run the test suite:
     ```bash
-    node --test --test-reporter=spec tests/voxelizer.test.js
+    npm test
+    # or with detailed output:
+    npm run test:spec
     ```
 *   To run syntax checks on all scripts:
     ```bash
-    for file in voxelizer/*.js; do node --check "$file"; done
+    npm run check
     ```
 
 ---
@@ -52,7 +77,7 @@ This project is developed using **Spec-Driven Development (SDD)** to ensure that
 
 ### `export-formats` — glTF/GLB and FBX ASCII Export (2026-07-20)
 
-Implemented via SDD change `export-formats` with strict TDD (202/202 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-export-formats/`.
+Implemented via SDD change `export-formats` with strict TDD (205/205 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-export-formats/`.
 
 #### ✨ Added
 
