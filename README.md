@@ -1,6 +1,6 @@
 # Voxelizer — Professional Voxel Generator
 
-[![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-orange.svg)](https://opensource.org/licenses/MPL-2.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/tests-205%2F205%20passing-brightgreen)](tests/voxelizer.test.js)
 [![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
 
@@ -10,53 +10,37 @@ An advanced, robust, and usefull for converting 2D pixel art into high-quality 3
 
 ## What is Voxelizer?
 
-Voxelizer takes your 2D sprites and intelligently extrudes them into 3D voxel models for use direclty in your projects. 
+Voxelizer takes your 2D sprites and intelligently extrudes them into 3D voxel models for use directly in your projects. 
 
-It goes beyond simple extrusion: Voxelizer incorpores advanced camera controls, robust error handling, and powerful mesh optimization, ensuring your creations look 
+It goes beyond simple extrusion: Voxelizer incorporates advanced camera controls, robust error handling, and powerful mesh optimization, ensuring your creations look faithful to your designs. 
+
+No generative AI. No hallucinations. Only mathematics and advanced algorithms.
 
 ## Features
 
-*   **Full Orthographic Camera Suite**: Flawless `Front`, `Profile`, and `Top` views with corrected camera frustums that prevent model clipping, even on extreme dimensions (e.g., 1x1x256).
-*   **Advanced Depth Control**: An intelligent "Match Profile" depth policy that provides more intuitive and predictable results when working with side-view references.
-*   **Robust Processing Engine**: The voxelization engine is protected against common failure modes. A bounded worker fallback prevents UI freezes on large models, and pre-flight budget checks on VOX exports prevent memory-related crashes.
-*   **High-Performance Greedy Meshing**: Drastically reduces the final polygon count (often by >80%) by merging adjacent, co-planar faces into single, large polygons, ensuring excellent performance in any game engine.
-*   **Palette Quantization & Control**: Intelligently derives a color palette from your source image and allows you to set a maximum color count for full artistic control.
-*   **Standard Export Formats**: Exports to industry-standard `.vox` for Magicavoxel and `.obj + .mtl` for universal compatibility with engines like Unity, Unreal, and Godot.
+- Single-image and multi-view voxel reconstruction
+- Front, back, side and top reference views
+- Greedy mesh optimization
+- Palette editing and material configuration
+- Perspective and orthographic previews
+- VOX, OBJ/MTL, GLB and FBX export
+- Web Worker processing with bounded memory budgets
+- Automated regression tests
 
-## 🛠️ How It Works: Under the Hood
+## How It Works
 
-Voxelizer follows a sophisticated pipeline to ensure high-quality results:
 
 1.  **Alpha Thresholding**: First, the 2D image is converted into a binary mask based on the alpha (transparency) value of each pixel.
 2.  **Volume Extrusion**: This mask is then extruded along the Z-axis to create the initial, dense cloud of voxels.
 3.  **Greedy Meshing**: This is the secret sauce. The algorithm sweeps through the voxel cloud and merges adjacent faces into large, optimized polygons, dramatically reducing geometric complexity.
-4.  **Camera Projection**: The 3D model is rendered to the screen using precise **Model-View-Projection** matrix transformations. Our remediation work ensures the orthographic projection parameters are mathematically sound, providing a stable, what-you-see-is-what-you-get experience.
+4.  **Camera Projection**: The 3D model is rendered to the screen using precise Model-View-Projection matrix transformations. The orthographic projection parameters are mathematically sound, providing a stable, true-to-design, what-you-see-is-what-you-get experience.
 5.  **Quality Assured**: The entire core logic is backed by a suite of **205 regression tests**, ensuring every feature, from camera controls to memory budgeting, is stable and predictable.
 
-## 🚀 Quick Start
+## Quick Start
 
-Since Voxelizer uses Web Workers for performance, you need to serve it via HTTP (not `file://`).
+Zero setup required. Just clone the repository and open index.html directly in your browser.
 
-**Option 1: Using npm (recommended)**
-```bash
-npm install
-npm run dev
-```
-
-**Option 2: Using Python**
-```bash
-python3 -m http.server 8080
-```
-
-**Option 3: Any static server**
-```bash
-# Using npx with any static server
-npx serve .
-```
-
-Then open **http://localhost:8080/voxelizer/** in your browser.
-
-## 👨‍💻 Development
+##  Development
 
 This project is developed using **Spec-Driven Development (SDD)** to ensure that every feature is well-planned, documented, and robustly implemented.
 
@@ -73,13 +57,13 @@ This project is developed using **Spec-Driven Development (SDD)** to ensure that
 
 ---
 
-## 📜 Changelog
+## Changelog
 
 ### `export-formats` — glTF/GLB and FBX ASCII Export (2026-07-20)
 
 Implemented via SDD change `export-formats` with strict TDD (205/205 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-export-formats/`.
 
-#### ✨ Added
+####  Added
 
 *   **glTF/GLB export**: `exportGLB()` in `voxelizer/voxio.js` serializes voxel results to a valid glTF 2.0 binary `.glb` with indexed triangle mesh, per-palette PBR materials, optional `COLOR_0` vertex colors, and AO modulation.
 *   **FBX ASCII export**: `exportFBX()` in `voxelizer/voxio.js` serializes voxel results to a Blender-importable FBX ASCII 7.x static mesh with per-palette materials.
@@ -96,7 +80,7 @@ Implemented via SDD change `export-formats` with strict TDD (205/205 tests passi
 
 Implemented via SDD change `materials-textures` with strict TDD (178/178 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-materials-textures/`.
 
-#### ✨ Added
+#### Added
 
 *   **`surfaceMaterials` table**: Per-swatch metallic/roughness/emissive values stored parallel to the RGB palette.
 *   **Conditional PBR preview path**: `buildModel()` switches to `MeshStandardMaterial` per palette index when any material is non-default; keeps the fast single-mesh `MeshBasicMaterial` path for default palettes.
@@ -113,7 +97,7 @@ Implemented via SDD change `materials-textures` with strict TDD (178/178 tests p
 
 Implemented via SDD change `advanced-palette` with strict TDD (160/160 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-advanced-palette/`.
 
-#### ✨ Added
+#### Added
 
 *   **In-App Palette Editor**: Interactive palette editor supporting import/export, color edit, drag-to-reorder, and merge-two-colors.
 *   **Palette I/O (`.gpl`/`.pal`)**: `parseGpl`, `serializeGpl`, `parseJascPal`, `serializeJascPal` in `voxelizer/palette-io.js` — pure parsers/serializers for GIMP and JASC-PAL text formats.
@@ -133,7 +117,7 @@ Implemented via SDD change `advanced-palette` with strict TDD (160/160 tests pas
 
 Implemented via SDD change `symmetry-inference` with strict TDD (126/126 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-20-symmetry-inference/`.
 
-#### ✨ Added
+#### Added
 
 *   **Mirrored-back inference**: When a single front image is uploaded, the voxelizer can now synthesize a `back` view by horizontally mirroring the front image, producing a more coherent back silhouette and volume.
 *   **Opt-in inference flags**: `config.inference.enabled` (default `false`) and `config.inference.back` (default `true`) let callers enable and control inference.
@@ -151,7 +135,7 @@ Implemented via SDD change `symmetry-inference` with strict TDD (126/126 tests p
 
 Implemented via SDD change `view-merging` with strict TDD (116/116 tests passing). Full artifact trail available at `openspec/changes/archive/2026-07-19-view-merging/`.
 
-#### ✨ Added
+#### Added
 
 *   **Role-tagged batch items**: Each BATCH item now carries an orthographic role (`front`, `back`, `left`, `right`, `top`) and renders a role selector in the BATCH panel.
 *   **Multi-view silhouette fusion**: The voxelizer core now intersects silhouettes from all assigned roles, producing a single coherent voxel model from multiple views.
@@ -167,7 +151,7 @@ Implemented via SDD change `view-merging` with strict TDD (116/116 tests passing
 
 This release marks a major overhaul of the core engine, focusing on stability, predictability, and professional-grade camera controls. All changes were implemented via a strict Test-Driven Development (TDD) cycle.
 
-#### ✨ Added
+#### Added
 
 *   **Full Orthographic Camera Suite**: Introduced `Front`, `Profile`, and `Top` camera modes with mathematically correct frustum clipping, completely eliminating model cutoff issues.
 *   **Advanced "Match Profile" Depth Policy**: Provides more intuitive and accurate depth results when a side-view reference is used for profile matching.

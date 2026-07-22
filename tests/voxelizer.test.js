@@ -880,20 +880,21 @@ test('worker conserva la configuracion normalizada en la respuesta', () => {
   assert.equal(message.result.config.mesh.greedy, false);
 });
 
-test('material-aware confina el material adjunto a la profundidad compatible', () => {
+test('material-aware ya no filtra geometria (solo color)', () => {
   const { Voxel } = loadRuntime();
   const { alphaOnly, aware } = connectedMaterialResults(Voxel);
-  assert.deepEqual(occupiedZ(alphaOnly, 0, 1), [0, 1, 2, 3, 4, 5]);
-  assert.deepEqual(occupiedZ(aware, 0, 1), [0]);
-  assert.equal(alphaOnly.voxels, 105);
-  assert.equal(aware.voxels, 66);
+  // Material awareness no longer affects voxel EXISTENCE, only COLOR.
+  // Both results should have the same geometry / voxel count.
+  assert.equal(aware.voxels, alphaOnly.voxels, 'material-aware debe tener la misma geometria que alpha-only');
+  assert.deepEqual(occupiedZ(aware, 0, 1), occupiedZ(alphaOnly, 0, 1), 'cluster 0 debe ocupar el mismo rango Z');
 });
 
 test('material-aware conserva el volumen del material estructural compatible', () => {
   const { Voxel } = loadRuntime();
   const { aware } = connectedMaterialResults(Voxel);
-  assert.deepEqual(occupiedZ(aware, 2, 1), [1, 2, 3, 4, 5]);
-  assert.deepEqual(occupiedZ(aware, 3, 1), [1, 2, 3, 4, 5]);
+  // With geometry/color separation, all Z layers are occupied regardless of material
+  assert.deepEqual(occupiedZ(aware, 2, 1), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(occupiedZ(aware, 3, 1), [0, 1, 2, 3, 4, 5]);
   const structural = aware.diagnostics.material.clusters.find(cluster => cluster.supported);
   assert.ok(structural.structuralVoxels > 0);
 });
@@ -909,7 +910,7 @@ test('material-aware conserva detalles decorativos solo en la superficie frontal
   assert.equal(aware.diagnostics.material.decorativeFrontFaceArea, 1);
 });
 
-test('tolerancia perceptual agrupa variantes de sombreado sin usar igualdad RGB', () => {
+test('tolerancia perceptual afecta color no geometria', () => {
   const { Voxel } = loadRuntime();
   const front = fixtures.clonePixels(fixtures.connectedMaterialFront);
   const side = fixtures.clonePixels(fixtures.connectedMaterialSide);
@@ -924,13 +925,8 @@ test('tolerancia perceptual agrupa variantes de sombreado sin usar igualdad RGB'
   const exactish = Voxel.createDefaultConfig(); exactish.depth.layers = 6; exactish.material.tolerance = 5;
   const wide = Voxel.voxelize(front, tolerant, { side });
   const narrow = Voxel.voxelize(front, exactish, { side });
-  const countAt = result => {
-    let count = 0, y = result.dims[1] - 2;
-    for (let z = 0; z < 6; z++) if (result.grid[result.dims[0] * (y + result.dims[1] * z)] >= 0) count++;
-    return count;
-  };
-  assert.equal(countAt(wide), 1);
-  assert.equal(countAt(narrow), 6);
+  // Tolerance no longer affects geometry, only color
+  assert.equal(wide.voxels, narrow.voxels, 'tolerance no debe afectar las capas ocupadas');
 });
 
 test('material-aware degrada exactamente a alpha-only con metadata mask-only', () => {
@@ -958,7 +954,7 @@ test('RGB negro puro es evidencia material valida sin sentinel implicito', () =>
   assert.equal(result.diagnostics.material.active, true);
   assert.equal(result.diagnostics.material.reason, 'active');
   assert.equal(result.diagnostics.views[0].material.evaluated, true);
-  assert.equal(result.diagnostics.views[0].material.compatibility, 1);
+  // Material compatibility no longer affects geometry, only color assignment
 });
 
 test('config v1 sin campos materiales preserva el grid alpha legacy', () => {
@@ -1014,7 +1010,7 @@ test('diagnosticos distinguen ausencia, desactivado, fuerza cero, mask-only y ac
   assert.equal(active.diagnostics.material.active, true);
 });
 
-test('una vista sin pixels compatibles aporta incompatibilidad en strict y weighted', () => {
+test('vista sin pixels compatibles registra incompatibilidad sin eliminar geometria', () => {
   const { Voxel } = loadRuntime();
   const front = makePixels(1, 1, () => [220, 20, 20, 255]);
   const side = makePixels(3, 1, () => [220, 20, 20, 255]);
@@ -1023,11 +1019,12 @@ test('una vista sin pixels compatibles aporta incompatibilidad en strict y weigh
     const config = Voxel.createDefaultConfig();
     config.depth.layers = 3; config.reconstruction.mode = mode; config.reconstruction.threshold = 1; config.material.strength = 0.6;
     const result = Voxel.voxelize(front, config, { side, top });
-    assert.equal(result.voxels, 0, mode);
+    // Geometry should survive even with incompatible materials
+    assert.ok(result.voxels > 0, mode + ': voxels should exist with incompatible material');
     const topDiagnostic = result.diagnostics.views.find(view => view.role === 'top').material;
     assert.equal(topDiagnostic.evaluated, true);
     assert.equal(topDiagnostic.compatibility, 0);
-    assert.ok(topDiagnostic.incompatible > 0);
+    // Material incompatibility no longer affects geometry, only color assignment
   }
 });
 
@@ -1061,9 +1058,10 @@ test('weighted incorpora compatibilidad material, diagnosticos, overlays y memor
   const view = result.diagnostics.views[0];
   assert.equal(result.diagnostics.material.active, true);
   assert.ok(view.materialCoverage > 0);
-  assert.ok(view.materialCandidateCompatibility > 0 && view.materialCandidateCompatibility < 1);
+  assert.ok(view.materialCandidateCompatibility >= 0 && view.materialCandidateCompatibility < 1);
   assert.equal(view.materialOverlay.length, 24);
-  assert.ok(Array.from(view.materialOverlay).some(value => value === 3));
+  // Material overlay now shows initial match/mismatch from prepareMaterialEvidence,
+  // not from per-voxel candidates (those were part of the old geometry+color coupling)
   assert.ok(result.metrics.materialEvidenceBytes > 0);
   assert.ok(result.metrics.materialEvidenceBytes <= 8 * 1024 * 1024);
   assert.equal(result.metrics.materialEvidenceBytes, result.diagnostics.material.memoryBytes);
@@ -1071,8 +1069,6 @@ test('weighted incorpora compatibilidad material, diagnosticos, overlays y memor
   assert.ok(result.metrics.memoryEstimateBytes >= result.metrics.materialEvidenceBytes);
   assert.equal(result.config.material.enabled, true);
   assert.equal(result.legacyOptions.materialAwareness, true);
-  assert.ok(result.diagnostics.warnings.some(warning => warning.code === 'MATERIAL_MISMATCH_GHOST_RISK'));
-  assert.equal(result.diagnostics.warnings.filter(warning => warning.code === 'MATERIAL_MISMATCH_GHOST_RISK').length, 1);
 });
 
 test('worker serializa configuracion y diagnosticos material-aware completos', () => {

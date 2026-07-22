@@ -1782,38 +1782,20 @@ function buildHull(quant, depthState, silhouettes, config, material) {
         let accepted = true;
         if (config.reconstruction.mode === 'strict') {
           for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
-          if (accepted && evidenceCluster !== NO_MATERIAL && material && material.active) {
-            let evidenceWeight = 0, compatibleWeight = 0;
-            for (const view of silhouettes.prepared) {
-              const sample = _viewSample(view, px, py, z);
-              const match = _materialMatchAt(material, view, evidenceCluster, sample);
-              if (match == null) continue;
-              const weight = _viewWeight(view, config)
-                * _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
-              evidenceWeight += weight;
-              compatibleWeight += weight * match;
-              const entry = _materialViewEntry(material, view);
-              _recordMaterialCandidate(entry, sample, match);
-            }
-            if (evidenceWeight > 0 && compatibleWeight / evidenceWeight < config.material.strength) accepted = false;
-          }
         } else {
           let score = frontColor >= 0 ? config.reconstruction.frontWeight : 0, total = config.reconstruction.frontWeight;
           for (const view of silhouettes.prepared) {
             const weight = _viewWeight(view, config), sample = _viewSample(view, px, py, z);
-            let confidence = _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
-            const match = evidenceCluster === NO_MATERIAL ? null : _materialMatchAt(material, view, evidenceCluster, sample);
-            if (match != null) {
-              confidence *= (1 - config.material.strength) + config.material.strength * match;
-              const entry = _materialViewEntry(material, view);
-              _recordMaterialCandidate(entry, sample, match);
-            }
+            const confidence = _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
             total += weight; score += weight * confidence;
           }
           const threshold = config.reconstruction.threshold <= 1
             ? config.reconstruction.threshold * total : config.reconstruction.threshold;
           accepted = score >= threshold;
         }
+        // Material evidence no longer affects voxel EXISTENCE.
+        // It only affects COLOR assignment in fuseVoxelColors.
+        // This separates geometry (silhouette overlap) from color (view sampling).
         if (!accepted) continue;
         grid[px + W * (my + H * z)] = ci; voxels++;
         if (evidenceCluster !== NO_MATERIAL && material && material.active) {
