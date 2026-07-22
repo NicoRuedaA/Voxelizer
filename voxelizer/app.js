@@ -681,9 +681,11 @@
     updateSwatches();
     const diagnostics = $('diagnostics');
     diagnostics.replaceChildren();
-    const warnings = r.diagnostics ? r.diagnostics.warnings.filter(w => w.code !== 'WORKER_FALLBACK') : [];
+    // Filter technical warnings that are only useful for developers
+    const technicalWarnings = ['WORKER_FALLBACK', 'SURFACE_ONLY_DETAILS'];
+    const warnings = r.diagnostics ? r.diagnostics.warnings.filter(w => !technicalWarnings.includes(w.code)) : [];
     if (!warnings.length) {
-      const ok = document.createElement('p'); ok.textContent = 'Silhouettes are consistent with the reconstructed projections.'; diagnostics.appendChild(ok);
+      // No need to show "all good" message - just leave diagnostics empty
     } else {
       warnings.forEach(warning => {
         const line = document.createElement('p');
@@ -692,15 +694,8 @@
         diagnostics.appendChild(line);
       });
     }
-    (r.diagnostics ? r.diagnostics.views : []).forEach(view => {
-      const select = document.createElement('button');
-      select.type = 'button'; select.className = 'diagnostic-view';
-      const compatibility = view.material && view.material.compatibility;
-      const material = compatibility == null ? 'material —' : `material ${(compatibility * 100).toFixed(0)}%`;
-      select.textContent = `${view.id} · ${view.role} · IoU ${(view.iou * 100).toFixed(0)}% · residual ${(view.residual * 100).toFixed(0)}% · ${material}`;
-      select.addEventListener('click', () => { state.diagnosticViewIds[view.role] = view.id; drawAlignmentPreview(view.role); });
-      diagnostics.appendChild(select);
-    });
+    // Remove technical diagnostic view buttons (IoU, residual, material %)
+    // These are developer-only metrics, not useful for end users
   }
 
   // ---------- thumbnails / batch ----------
