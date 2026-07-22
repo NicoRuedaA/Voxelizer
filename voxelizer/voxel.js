@@ -2214,6 +2214,34 @@ function _hasRealBack(views) {
   if (Array.isArray(views.views)) return views.views.some(view => view && view.role === 'back');
   return false;
 }
+
+// ---- auto-alignment between views ----
+function autoAlignViews(views, alphaThreshold) {
+  if (!views || !Array.isArray(views)) return views;
+  const thresh = alphaThreshold || 40;
+  // Find front view as reference
+  const front = views.find(v => v.role === 'front' && v.pixels);
+  if (!front) return views;
+  const refBounds = opaqueBounds(front.pixels, thresh);
+  if (!refBounds) return views;
+  const refBottom = refBounds.maxY;
+  const refCenterX = (refBounds.minX + refBounds.maxX) / 2;
+
+  const refHeight = refBounds.height;
+  const refWidth = refBounds.width;
+
+  return views.map(view => {
+    if (view.role === 'front' || !view.pixels) return { ...view, autoOffsetX: 0, autoOffsetY: 0 };
+    const bounds = opaqueBounds(view.pixels, thresh);
+    if (!bounds) return { ...view, autoOffsetX: 0, autoOffsetY: 0 };
+    // Align bottom (maxY of opaque pixels)
+    const offsetY = refBottom - bounds.maxY;
+    // Center horizontally
+    const viewCenterX = (bounds.minX + bounds.maxX) / 2;
+    const offsetX = Math.round(refCenterX - viewCenterX);
+    return { ...view, autoOffsetX: offsetX, autoOffsetY: offsetY };
+  });
+}
 function _mergeInferredViews(frontPixels, views, config) {
   if (!config.inference.enabled || !config.inference.back) return views;
   if (_hasRealBack(views)) return views;
@@ -2381,6 +2409,7 @@ voxelRoot.Voxel = {
   legacyOptionsFromConfig,
   normalizeConfig,
   inferViews,
+  autoAlignViews,
   _maskBounds,
   prepareSilhouettes,
   transformViews,

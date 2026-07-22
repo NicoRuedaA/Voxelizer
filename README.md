@@ -1,20 +1,20 @@
-# Voxelizer v0.5 — Professional 2D to 3D Voxel Converter
+# Voxelizer — Professional Voxel Generator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/tests-205%2F205%20passing-brightgreen)](tests/voxelizer.test.js)
 [![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
 
-An advanced, robust, and predictable tool for converting 2D pixel art into high-quality 3D voxel models, designed for artists and game developers.
+An advanced, robust, and usefull for converting 2D pixel art into high-quality 3D voxel models. Designed for and by game developers.
 
 ![Voxelizer UI](https://github.com/NicoRuedaA/Voxelizer/blob/main/assets/image.webp)
 
-## ✨ What is Voxelizer?
+## What is Voxelizer?
 
-Voxelizer takes your 2D sprites and intelligently extrudes them into 3D voxel models suitable for use in games, art, and prototyping. It goes beyond simple extrusion by incorporating advanced camera controls, robust error handling, and powerful mesh optimization, ensuring your creations look great from every angle without performance bottlenecks.
+Voxelizer takes your 2D sprites and intelligently extrudes them into 3D voxel models for use direclty in your projects. 
 
-This version represents a significant leap in stability and professional-grade features over the original proof-of-concept.
+It goes beyond simple extrusion: Voxelizer incorpores advanced camera controls, robust error handling, and powerful mesh optimization, ensuring your creations look 
 
-## 🚀 Features
+## Features
 
 *   **Full Orthographic Camera Suite**: Flawless `Front`, `Profile`, and `Top` views with corrected camera frustums that prevent model clipping, even on extreme dimensions (e.g., 1x1x256).
 *   **Advanced Depth Control**: An intelligent "Match Profile" depth policy that provides more intuitive and predictable results when working with side-view references.

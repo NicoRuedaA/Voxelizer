@@ -37,6 +37,7 @@
     batchCancelRequested: false,
     batchProgress: { visible: false, done: 0, total: 0, label: 'Listo' },
     diagnosticViewIds: {},
+    autoAlignment: {},    // { side: { offsetX, offsetY }, back: { offsetX, offsetY }, ... }
     paletteEdit: null,
   };
 
@@ -126,7 +127,20 @@
     return 0.42 + 0.58 * d;
   }
   function cloneOpts(opts = state.opts) {
-    return cloneData(opts);
+    const cloned = cloneData(opts);
+    // Merge auto-alignment into the transform for each role
+    if (state.autoAlignment) {
+      for (const [role, auto] of Object.entries(state.autoAlignment)) {
+        if (!auto || (auto.offsetX === 0 && auto.offsetY === 0)) continue;
+        // Find the right alignment slot for this role
+        const key = (role === 'left' || role === 'right' || role === 'side') ? 'side'
+          : (role === 'top' ? 'top' : null);
+        if (!key || !cloned.alignment[key]) continue;
+        cloned.alignment[key].offsetX = (cloned.alignment[key].offsetX || 0) + (auto.offsetX || 0);
+        cloned.alignment[key].offsetY = (cloned.alignment[key].offsetY || 0) + (auto.offsetY || 0);
+      }
+    }
+    return cloned;
   }
   function activeRecord() {
     return items.find(it => it.canvas === state.sourceCanvas) || null;
@@ -634,6 +648,16 @@
     state.pixels = pixels;
     const t0 = performance.now();
     const views = getItemViews(items.find(it => it.canvas === state.sourceCanvas) || {}, state.sheet, state.sheet.frame);
+    // Auto-align auxiliary views to front view
+    const allViews = [{ role: 'front', pixels }, ...views.views];
+    const aligned = Voxel.autoAlignViews(allViews, state.opts.alpha);
+    const autoAlignment = {};
+    for (const v of aligned) {
+      if (v.autoOffsetX || v.autoOffsetY) {
+        autoAlignment[v.role] = { offsetX: v.autoOffsetX, offsetY: v.autoOffsetY };
+      }
+    }
+    state.autoAlignment = autoAlignment;
     state.busy = true;
     invalidatePreviewEvidence('Voxelizando…');
     refreshActionState();
@@ -1233,6 +1257,17 @@
   function updateAlignmentViews() {
     syncAlignmentControls('side');
     syncAlignmentControls('top');
+    // Show auto-alignment info
+    for (const kind of ['side', 'top', 'back', 'left', 'right']) {
+      const el = $(kind + 'AutoAlign');
+      if (!el) continue;
+      const align = state.autoAlignment && state.autoAlignment[kind === 'side' ? 'side' : kind];
+      if (align && (align.offsetX || align.offsetY)) {
+        el.textContent = `Auto alineación: X${align.offsetX > 0 ? '+' : ''}${align.offsetX} Y${align.offsetY > 0 ? '+' : ''}${align.offsetY}`;
+      } else {
+        el.textContent = '';
+      }
+    }
   }
   function slider(id, valId, fn, fmt, trigger = true) {
     const el = $(id);
