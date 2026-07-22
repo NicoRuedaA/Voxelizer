@@ -681,7 +681,7 @@
     updateSwatches();
     const diagnostics = $('diagnostics');
     diagnostics.replaceChildren();
-    const warnings = r.diagnostics ? r.diagnostics.warnings : [];
+    const warnings = r.diagnostics ? r.diagnostics.warnings.filter(w => w.code !== 'WORKER_FALLBACK') : [];
     if (!warnings.length) {
       const ok = document.createElement('p'); ok.textContent = 'Silhouettes are consistent with the reconstructed projections.'; diagnostics.appendChild(ok);
     } else {

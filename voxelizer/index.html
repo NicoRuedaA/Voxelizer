@@ -73,11 +73,11 @@ body{
   radial-gradient(900px 600px at 50% 38%, #1f2128 0%, #141519 78%);}
 
 .sec-h{
-  font-family:var(--pix);font-size:9px;letter-spacing:.6px;color:var(--dim);
-  padding:11px 13px 7px;display:flex;align-items:center;justify-content:space-between;
-  text-transform:uppercase;
+  font-family:var(--pix);font-size:10px;letter-spacing:.8px;color:var(--dim);
+  padding:14px 13px 8px;display:flex;align-items:center;justify-content:space-between;
+  text-transform:uppercase;font-weight:500;
 }
-.sec-h .count{color:var(--dim2)}
+.sec-h .count{color:var(--dim2);font-size:9px}
 
 /* ---------- batch (left) ---------- */
 .drop{
@@ -156,8 +156,8 @@ body{
 
 /* ---------- inspector (right) ---------- */
 .insp{flex:1;overflow-y:auto;padding-bottom:14px}
-.grp{border-bottom:1px solid var(--line);padding:0 0 12px}
-.ctl{padding:7px 14px 0}
+.grp{border-bottom:1px solid var(--line);padding:0 0 16px;margin-bottom:2px}
+.ctl{padding:8px 14px 0}
 .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:7px}
 .lbl{color:var(--dim);display:flex;align-items:center;gap:6px}
 .lbl .flag{color:var(--dim2);font-size:10px}
@@ -218,10 +218,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .mini-reset{border:1px solid var(--line2);background:var(--bg2);color:var(--dim);border-radius:999px;padding:5px 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer}
 .mini-reset:hover{background:var(--bg3);color:var(--txt)}
 .mini-reset:disabled{opacity:.55;cursor:not-allowed}
-.adv-panel{margin-top:12px;padding-top:10px;border-top:1px solid var(--line2)}
-.adv-panel summary{cursor:pointer;list-style:none;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);user-select:none}
+.adv-panel{margin-top:14px;padding:10px 10px 6px;border:1px solid var(--line2);border-radius:7px;background:var(--bg1)}
+.adv-panel summary{cursor:pointer;list-style:none;font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--dim);user-select:none;padding:0 2px;font-weight:500}
 .adv-panel summary::-webkit-details-marker{display:none}
-.adv-panel[open] summary{color:var(--txt)}
+.adv-panel[open] summary{color:var(--sel);margin-bottom:8px}
+.adv-panel[open]{padding-bottom:10px}
 .align-grid{display:grid;gap:10px;margin-top:10px}
 .align-card{padding:10px;border:1px solid var(--line2);border-radius:8px;background:var(--bg2)}
 .align-card h4{margin:0 0 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt)}
@@ -236,8 +237,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 }
 .align-preview canvas{display:block;width:100%;height:92px;border-radius:4px;background:var(--bg1);image-rendering:pixelated}
 .align-meta{margin-top:6px;font-size:10px;color:var(--dim2);line-height:1.5}
-.diagnostics{margin-top:10px;display:grid;gap:5px}
-.diagnostics p{padding:7px 8px;border-radius:5px;background:var(--bg3);color:var(--dim);line-height:1.45}
+.diagnostics{margin-top:14px;padding:10px;border:1px solid var(--line2);border-radius:7px;background:var(--bg1);display:grid;gap:5px}
+.diagnostics p{padding:7px 8px;border-radius:5px;background:var(--bg3);color:var(--dim);line-height:1.45;font-size:10px}
 .diagnostics p.warning{border-left:3px solid var(--accent)}
 .diagnostics p.error{border-left:3px solid #ff6b6b;color:#ffb4b4}
 .diagnostics .diagnostic-view{padding:7px 8px;border:1px solid var(--line2);border-radius:5px;background:var(--bg3);color:var(--dim);text-align:left;cursor:pointer}
@@ -465,14 +466,16 @@ input[type=range]:focus-visible,
               <div id="slotSide" class="vslot" role="button" tabindex="0" aria-label="Añadir vista de perfil">Perfil<span>+ añadir</span></div>
               <div id="slotTop" class="vslot" role="button" tabindex="0" aria-label="Añadir vista cenital">Cenital<span>+ añadir</span></div>
             </div>
-            <div style="display:flex;gap:6px">
+            <div style="display:flex;gap:6px;margin-bottom:10px">
               <div id="slotDepth" class="vslot" role="button" tabindex="0" aria-label="Añadir mapa de profundidad">Depth<span>+ añadir</span></div>
             </div>
-            <div class="hint" style="text-align:left;margin-top:8px">Las vistas adicionales (trasera, izquierda, derecha, perfil, cenital) se usan para fusionar color en caras múltiples. Perfil también sirve para calibración de profundidad.</div>
-              <div class="row" style="margin-top:9px"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
-              <div class="hint" id="inferenceHint" style="text-align:left">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
+            <div class="hint" style="text-align:left;margin-bottom:12px">Las vistas adicionales (trasera, izquierda, derecha, perfil, cenital) se usan para fusionar color en caras múltiples. Perfil también sirve para calibración de profundidad.</div>
+            <div style="border-top:1px solid var(--line);padding-top:10px">
+              <div class="row"><span class="lbl">Inferir vista trasera</span><button type="button" class="toggle" id="inferenceEnabled" aria-pressed="false"></button></div>
+              <div class="hint" id="inferenceHint" style="text-align:left;margin-top:4px">Espeja la imagen frontal para estimar la silueta trasera. Funciona mejor con sprites simétricos; en modo <b>fusionar vistas</b> la cara trasera hereda los colores espejados del frontal.</div>
               <div class="row" style="margin-top:9px"><span class="lbl">Inferir solo trasera</span><button type="button" class="toggle" id="inferenceBack" aria-pressed="false"></button></div>
-              <div class="hint" id="inferenceBackHint" style="text-align:left">Cuando está activo, solo infiere la vista trasera (ignora perfil/cenital). Útil para sprites front+back.</div>
+              <div class="hint" id="inferenceBackHint" style="text-align:left;margin-top:4px">Cuando está activo, solo infiere la vista trasera (ignora perfil/cenital). Útil para sprites front+back.</div>
+            </div>
             <details class="adv-panel" id="advancedFusion">
               <summary>Fusión y confianza</summary>
               <div class="seg" id="reconstructionModeSeg" style="margin-top:10px"><button data-reconstruction="strict" class="on">Estricto</button><button data-reconstruction="weighted">Ponderado</button></div>
