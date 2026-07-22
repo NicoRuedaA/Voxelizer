@@ -399,7 +399,7 @@ function inferViews(frontPixels, config) {
       mirrored[dst + 3] = data[src + 3];
     }
   }
-  return { role: 'back', pixels: { w, h, data: mirrored } };
+  return { role: 'back', pixels: { w, h, data: mirrored }, inferred: true };
 }
 function _measureStage(stageMs, name, fn) {
   const start = _nowMs();
