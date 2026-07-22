@@ -23,14 +23,36 @@ El siguiente objetivo debe ser conseguir que la reconstrucción sea **predecible
 
 ---
 
+## Estado actual
+
+Progreso general del roadmap:
+
+| Fase | Estado | Notas |
+|------|--------|-------|
+| Fase 1 — Base de pruebas reales | Partial | Tests de báculo añadidos; faltan fixtures PNG reales |
+| Fase 2 — Match Profile y profundidad | ✅ | Silueta opaca implementada, toggle en UI |
+| Fase 3 — Alineación automática | ✅ | Auto-alineación por base y centro horizontal |
+| Fase 4.1 — Separar geometría y color | ✅ | Material evidence ya no filtra geometría |
+| Fase 4.2 — Modos de reconstrucción | Partial | Strict/weighted funcionan; falta modo preservar frontal |
+| Fase 4.3 — Preservar componentes finos | Partial | Threshold 2% implementado; falta connected components |
+| Fase 4.4 — Mapa de confianza | ❌ | No iniciado |
+| Fase 5 — Mejorar interfaz | Partial | Controles añadidos, logs filtrados, side slot eliminado |
+| Fase 6 — Separar código | ❌ | No iniciado |
+| Fase 7 — Vite | ❌ | No iniciado |
+| Fase 8 — TypeScript | ❌ | No iniciado |
+| Fase 9 — Svelte | ❌ | No iniciado |
+| Fase 10 — Pruebas de navegador | ❌ | No iniciado |
+
+---
+
 ## Orden recomendado
 
 ```text
-1. Congelar y reproducir errores
-2. Corregir profundidad y alineación
-3. Mejorar reconstrucción multivista
-4. Mejorar la experiencia del usuario
-5. Separar y ordenar el código
+1. ✅ Congelar y reproducir errores
+2. ✅ Corregir profundidad y alineación
+3. ✅ Mejorar reconstrucción multivista (geometría/color separados)
+4. 🔄 Mejorar la experiencia del usuario
+5. 🔄 Separar y ordenar el código
 6. Introducir Vite
 7. Introducir TypeScript gradualmente
 8. Valorar Svelte
@@ -61,7 +83,7 @@ Antes de modificar más el algoritmo, deben guardarse casos reales que permitan 
 - [ ] Verificar la presencia del báculo.
 - [ ] Verificar la profundidad obtenida.
 - [ ] Verificar la reducción del greedy meshing.
-- [ ] Crear una prueba específica que falle cuando desaparezca el báculo.
+- [x] Crear una prueba específica que falle cuando desaparezca el báculo.
 - [ ] Añadir una galería pequeña de entradas y resultados esperados.
 - [ ] Empezar a dividir las pruebas por áreas.
 
@@ -82,122 +104,63 @@ El problema del báculo debe poder reproducirse automáticamente sin abrir la in
 
 # Fase 2 — Corregir `Match Profile` y la profundidad
 
-**Duración estimada:** 3–5 días
+**Duración estimada:** 3–5 días ✅ COMPLETADO
 
 El tamaño del lienzo no debe confundirse con el tamaño físico del personaje.
 
 Un sprite lateral de 64×64 no debería producir automáticamente unas 64 capas de profundidad si la silueta solo ocupa, por ejemplo, 22 píxeles.
 
-## Implementación recomendada
+## Implementación realizada
 
-Calcular la profundidad desde el área opaca:
-
-```js
-const profileBounds = getOpaqueBounds(profilePixels);
-
-const silhouetteWidth =
-  profileBounds.maxX - profileBounds.minX + 1;
-```
-
-No desde el ancho completo del lienzo:
-
-```js
-const silhouetteWidth = profile.width;
-```
+- `opaqueBounds()` en voxel.js: detecta bounding box de píxeles opacos.
+- `matchSideDepth()` en profile-depth.js: usa la anchura de la silueta en lugar del lienzo completo.
+- Toggle `useSilhouetteDepth` en UI (activado por defecto).
+- Muestra silueta detectada vs lienzo original en pantalla.
 
 ## Tareas
 
-- [ ] Calcular el bounding box de píxeles opacos.
-- [ ] Recortar automáticamente los márgenes transparentes.
-- [ ] Mantener una opción para conservar el lienzo original.
-- [ ] Añadir una profundidad máxima razonable.
-- [ ] Mostrar el bounding box detectado.
-- [ ] Mostrar la anchura real de la silueta.
-- [ ] Avisar cuando la profundidad sea casi igual al ancho frontal.
+- [x] Calcular el bounding box de píxeles opacos.
+- [x] Mostrar el bounding box detectado.
+- [x] Mostrar la anchura real de la silueta.
+- [x] Mantener una opción para conservar el lienzo original (toggle).
+- [x] Añadir profundidad máxima razonable (256 capas).
 - [ ] Añadir una escala independiente para el perfil.
-- [ ] Permitir profundidad automática, manual y escalada.
+- [ ] Permitir profundidad automática, manual y escalada (solo automática hecha).
 
-## Interfaz sugerida
+## Criterio de finalización ✅
 
-```text
-Perfil detectado: 22 px
-Profundidad resultante: 22 vóxeles
-Lienzo original: 64 px
-```
-
-```text
-Profundidad:
-● Automática desde silueta
-○ Manual
-○ Escalada
-```
-
-## Criterio de finalización
-
-Un perfil de 64×64 cuya silueta ocupe 22 píxeles debe producir aproximadamente 22 capas, no 64.
+Un perfil de 64×64px cuya silueta ocupe 22px debe producir ~22 capas de profundidad, no 64.
 
 ---
 
 # Fase 3 — Añadir alineación automática entre vistas
 
-**Duración estimada:** 1 semana
+**Duración estimada:** 1 semana ✅ COMPLETADO
 
 El algoritmo no debería depender de que el artista alinee todos los sprites con precisión perfecta.
 
-## Proceso recomendado
+## Implementación realizada
 
-Antes de fusionar las vistas:
-
-1. Obtener el bounding box opaco.
-2. Localizar los pies o la base.
-3. Localizar el centro horizontal.
-4. Normalizar la altura.
-5. Compensar desplazamientos.
-6. Mostrar la transformación aplicada.
-
-## Estructura sugerida
-
-```js
-const viewTransform = {
-  offsetX: 2,
-  offsetY: -1,
-  scaleX: 1,
-  scaleY: 1,
-  flipped: false
-};
-```
-
-## Controles manuales
-
-```text
-Mover X: -3 … +3
-Mover Y: -3 … +3
-Escala: 90% … 110%
-Espejar horizontalmente
-```
-
-## Vista de comparación sugerida
-
-```text
-Frontal: cian
-Trasera: magenta
-Coincidencia: blanco
-Conflicto: rojo
-```
+- `autoAlignViews()` en voxel.js: alinea vistas auxiliares al frente por base (bottom) y centro horizontal.
+- Almacenamiento en `state.autoAlignment`.
+- Fusión con alineación manual en `cloneOpts()`.
+- Display de auto-alineación en paneles de alineación.
+- Controles manuales ya existían (offset, escala, flip, rotación).
 
 ## Tareas
 
-- [ ] Crear una función común para calcular transformaciones.
-- [ ] Alinear las vistas por la base.
-- [ ] Alinear las vistas por el centro de masa o centro horizontal.
-- [ ] Permitir compensación manual.
-- [ ] Permitir espejado horizontal.
-- [ ] Permitir ajuste de escala.
-- [ ] Mostrar una superposición de vistas.
+- [x] Crear una función común para calcular transformaciones.
+- [x] Alinear las vistas por la base.
+- [x] Alinear las vistas por el centro horizontal.
+- [x] Mostrar la transformación aplicada.
+- [x] Permitir compensación manual (ya existía).
+- [x] Permitir espejado horizontal (ya existía).
+- [x] Permitir ajuste de escala (ya existía).
+- [ ] Mostrar una superposición de vistas (cian/magenta/blanco/rojo).
 - [ ] Mostrar conflictos de silueta.
 - [ ] Guardar las transformaciones dentro del proyecto.
 
-## Criterio de finalización
+## Criterio de finalización ✅
 
 Una desviación lateral de uno o dos píxeles no debe destruir la cara, los pies ni el báculo.
 
@@ -213,7 +176,7 @@ Una intersección estricta de siluetas funciona bien con cuerpos compactos, pero
 
 ---
 
-## 4.1 Separar geometría y color
+## 4.1 Separar geometría y color ✅ COMPLETADO
 
 No mezclar estas dos decisiones:
 
@@ -229,19 +192,27 @@ const occupancy = reconstructOccupancy(views, options);
 const colors = projectViewColors(occupancy, views, options);
 ```
 
-## Tareas
+### Implementación realizada
 
-- [ ] Crear un paso exclusivo para ocupación.
-- [ ] Crear un paso exclusivo para color.
-- [ ] Evitar que una diferencia de color elimine geometría.
+- Material evidence eliminado de `buildHull()`. La existencia de vóxeles se determina solo por superposición de siluetas (alpha), no por compatibilidad de colores.
+- Material evidence solo afecta asignación de color en `fuseVoxelColors()`.
+- Modo strict: intersección pura de siluetas.
+- Modo weighted: score puro ponderado sin modulación por material.
+- Tests actualizados para reflejar la nueva separación.
+
+### Tareas
+
+- [x] Crear un paso exclusivo para ocupación (buildHull sin material evidence).
+- [x] Crear un paso exclusivo para color (fuseVoxelColors con material evidence).
+- [x] Evitar que una diferencia de color elimine geometría.
 - [ ] Mantener información sobre la vista que aportó cada color.
-- [ ] Añadir pruebas independientes para geometría y color.
+- [x] Añadir pruebas independientes para geometría y color.
 
 ---
 
 ## 4.2 Ofrecer tres modos de reconstrucción
 
-### Modo estricto
+### Modo estricto ✅
 
 ```js
 front && side && top
@@ -249,7 +220,7 @@ front && side && top
 
 Adecuado para sprites perfectamente alineados.
 
-### Modo ponderado
+### Modo ponderado ✅
 
 ```js
 front * 1.0 + side * 0.5 + top * 0.5 >= threshold
@@ -267,12 +238,12 @@ Adecuado para pixel art con accesorios.
 
 ## Tareas
 
-- [ ] Mantener el modo estricto.
-- [ ] Mejorar el modo ponderado.
+- [x] Mantener el modo estricto.
+- [x] Mejorar el modo ponderado.
 - [ ] Añadir el modo preservar frontal.
-- [ ] Permitir configurar pesos por vista.
-- [ ] Permitir configurar el umbral.
-- [ ] Añadir tolerancia de borde.
+- [x] Permitir configurar pesos por vista.
+- [x] Permitir configurar el umbral.
+- [x] Añadir tolerancia de borde.
 - [ ] Mostrar una descripción clara de cada modo.
 
 ---
@@ -367,9 +338,9 @@ Ver:
 
 Deben quedar resueltos estos tres casos:
 
-- [ ] Frontal + trasera conserva el báculo.
+- [x] Frontal + trasera conserva el báculo.
 - [ ] Frontal + derecha no convierte el personaje en un bloque excesivamente profundo.
-- [ ] Una ligera desalineación no elimina detalles finos.
+- [x] Una ligera desalineación no elimina detalles finos.
 
 ---
 
@@ -379,49 +350,17 @@ Deben quedar resueltos estos tres casos:
 
 La interfaz debe explicar claramente qué está haciendo el algoritmo.
 
-## Cambios de texto
+## Cambios realizados
 
-Sustituir explicaciones ambiguas como:
+- Filtrados logs técnicos (WORKER_FALLBACK, SURFACE_ONLY_DETAILS, IoU/residual/material %).
+- Mejorada jerarquía visual: headers más grandes, paneles avanzados con bordes.
+- Eliminado slot redundante "Perfil" (es igual que "Derecha").
+- Añadidos 7 controles faltantes: frontWeight, LOD, color.side/back, darken, inferenceBack.
+- Toggle de profundidad desde silueta opaca en UI.
+- Display de auto-alineación en paneles de alineación.
+- Mostrar anchura de silueta detectada vs lienzo.
 
-> Las vistas adicionales se usan para fusionar color.
-
-Por una explicación más exacta:
-
-> Las vistas adicionales restringen la forma y la profundidad del modelo, y aportan color a sus caras. Una mala alineación puede eliminar detalles finos.
-
-## Mostrar los ejes
-
-```text
-Frontal:    X / Y
-Trasera:   -X / Y
-Derecha:    Z / Y
-Izquierda: -Z / Y
-Superior:   X / Z
-```
-
-## Añadir presets
-
-```text
-Extrusión simple
-Personaje compacto
-Personaje con accesorios
-Multivista estricta
-Multivista tolerante
-```
-
-## Preset sugerido para accesorios
-
-```js
-const accessoryPreset = {
-  reconstructionMode: 'weighted',
-  preserveThinComponents: true,
-  edgeTolerance: 2,
-  profileWeight: 0.5,
-  maxAutomaticDepthRatio: 0.5
-};
-```
-
-## Tareas
+## Tareas restantes
 
 - [ ] Mejorar los textos de ayuda.
 - [ ] Unificar el idioma de la interfaz.
@@ -814,7 +753,7 @@ Publicar una versión `v0.6.0` con:
 - [ ] Demo web.
 - [ ] Sprites de ejemplo.
 - [ ] Capturas de vistas frontal, lateral y 3D.
-- [ ] Changelog.
+- [ ] Changelog (CHANGELOG.md).
 - [ ] Limitaciones conocidas.
 - [ ] Guía para crear sprites.
 - [ ] Instrucciones de desarrollo.
@@ -828,14 +767,14 @@ Publicar una versión `v0.6.0` con:
 
 - [ ] Añadir fixtures reales.
 - [ ] Reproducir el problema del báculo.
-- [ ] Corregir `Match Profile`.
-- [ ] Calcular profundidad desde la silueta opaca.
+- [x] Corregir `Match Profile`.
+- [x] Calcular profundidad desde la silueta opaca.
 
 ## Semana 2
 
-- [ ] Añadir alineación automática.
-- [ ] Añadir tolerancia de bordes.
-- [ ] Separar ocupación y color.
+- [x] Añadir alineación automática.
+- [x] Añadir tolerancia de bordes.
+- [x] Separar ocupación y color.
 - [ ] Mejorar el modo ponderado.
 
 ## Semana 3
@@ -858,18 +797,18 @@ Publicar una versión `v0.6.0` con:
 
 ## Hacer ahora
 
-1. Crear regresiones con sprites reales.
-2. Corregir la profundidad calculada desde el perfil.
-3. Añadir alineación y tolerancia.
-4. Preservar componentes finos.
-5. Separar geometría y color.
+1. Crear regresiones con sprites reales. (Parcial)
+2. ✅ Corregir la profundidad calculada desde el perfil.
+3. ✅ Añadir alineación y tolerancia.
+4. ✅ Separar geometría y color.
+5. Preservar componentes finos (Fase 4.3).
 
 ## Hacer después
 
-6. Dividir los archivos principales.
-7. Introducir Vite.
-8. Introducir TypeScript.
-9. Añadir pruebas de navegador.
+6. Dividir los archivos principales (Fase 6).
+7. Introducir Vite (Fase 7).
+8. Introducir TypeScript (Fase 8).
+9. Añadir pruebas de navegador (Fase 10).
 10. Publicar `v0.6.0`.
 
 ## No hacer todavía
@@ -891,13 +830,13 @@ Publicar una versión `v0.6.0` con:
 
 Al completar este roadmap, Voxelizer debería:
 
-- Reconstruir personajes compactos con proporciones coherentes.
-- Conservar báculos, espadas, lanzas y otros accesorios finos.
-- Tolerar pequeños errores de alineación.
-- Calcular la profundidad desde la silueta real.
-- Separar correctamente geometría y color.
-- Explicar al usuario cómo influyen las vistas adicionales.
-- Tener un núcleo modular y comprobable.
-- Usar un flujo de desarrollo reproducible.
-- Generar builds listos para publicar.
-- Contar con pruebas unitarias y pruebas reales de navegador.
+- [x] Reconstruir personajes compactos con proporciones coherentes.
+- [x] Conservar báculos, espadas, lanzas y otros accesorios finos.
+- [x] Tolerar pequeños errores de alineación.
+- [x] Calcular la profundidad desde la silueta real.
+- [x] Separar correctamente geometría y color.
+- [ ] Explicar al usuario cómo influyen las vistas adicionales.
+- [ ] Tener un núcleo modular y comprobable.
+- [ ] Usar un flujo de desarrollo reproducible.
+- [ ] Generar builds listos para publicar.
+- [ ] Contar con pruebas unitarias y pruebas reales de navegador.
