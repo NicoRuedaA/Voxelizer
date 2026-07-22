@@ -713,6 +713,17 @@
     dimsStrong.textContent = `${r.dims[0]}×${r.dims[1]}×${r.dims[2]}`;
     statDims.replaceChildren(dimsStrong, document.createTextNode(' grid'));
     $('statMain').textContent = `Voxelizado en ${ms.toFixed(0)} ms`;
+    // Confidence display
+    const confEl = $('statConfidence');
+    if (r.confidenceGrid && r.metrics && r.metrics.avgConfidence != null) {
+      const avg = r.metrics.avgConfidence;
+      const pct = (avg * 100).toFixed(0);
+      const color = avg >= 0.95 ? 'var(--sel)' : (avg >= 0.7 ? 'var(--accent)' : '#ff6b6b');
+      confEl.textContent = `confianza ${pct}%`;
+      confEl.style.color = color;
+    } else {
+      confEl.textContent = '';
+    }
     // swatches
     updateSwatches();
     const diagnostics = $('diagnostics');

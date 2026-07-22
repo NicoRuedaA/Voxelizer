@@ -1835,6 +1835,7 @@ function buildHull(quant, depthState, silhouettes, config, material) {
   const prof = depthState.profile || null;
   _assertVoxelBudget(W, H, D);
   const grid = new Int16Array(W * H * D).fill(-1);
+  const confidenceGrid = new Float32Array(W * H * D);
   const totalEffectiveWeight = config.reconstruction.frontWeight
     + silhouettes.prepared.reduce((sum, view) => sum + _viewWeight(view, config), 0);
   if (config.reconstruction.mode === 'weighted' && totalEffectiveWeight <= 0) {
@@ -1870,32 +1871,33 @@ function buildHull(quant, depthState, silhouettes, config, material) {
       const my = H - 1 - py;
       for (let z = z0; z < z1; z++) {
         let accepted = true;
+        let voxelConfidence = 1.0;
         if (config.reconstruction.mode === 'strict') {
           for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
         } else if (config.reconstruction.mode === 'preserve-front') {
-          // For thin components (staff, accessories), accept based on front alone
           if (thinMask && thinMask[i]) {
             accepted = true;
           } else {
-            // For body pixels, use strict silhouette intersection
             for (const view of silhouettes.prepared) if (_viewConfidenceAt(view, _viewSample(view, px, py, z), config.reconstruction.edgeTolerance) <= 0) { accepted = false; break; }
           }
         } else {
+          // Weighted mode: compute score and confidence in one pass
           let score = frontColor >= 0 ? config.reconstruction.frontWeight : 0, total = config.reconstruction.frontWeight;
           for (const view of silhouettes.prepared) {
             const weight = _viewWeight(view, config), sample = _viewSample(view, px, py, z);
-            const confidence = _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
-            total += weight; score += weight * confidence;
+            const conf = _viewConfidenceAt(view, sample, config.reconstruction.edgeTolerance);
+            total += weight; score += weight * conf;
           }
           const threshold = config.reconstruction.threshold <= 1
             ? config.reconstruction.threshold * total : config.reconstruction.threshold;
           accepted = score >= threshold;
+          voxelConfidence = total > 0 ? score / total : 1.0;
         }
         // Material evidence no longer affects voxel EXISTENCE.
-        // It only affects COLOR assignment in fuseVoxelColors.
-        // This separates geometry (silhouette overlap) from color (view sampling).
+        // Only COLOR assignment in fuseVoxelColors.
         if (!accepted) continue;
         grid[px + W * (my + H * z)] = ci; voxels++;
+        confidenceGrid[px + W * (my + H * z)] = voxelConfidence;
         if (evidenceCluster !== NO_MATERIAL && material && material.active) {
           material.acceptedVoxels[evidenceCluster]++;
           if (z < material.acceptedMinZ[evidenceCluster]) material.acceptedMinZ[evidenceCluster] = z;
@@ -1904,7 +1906,7 @@ function buildHull(quant, depthState, silhouettes, config, material) {
       }
     }
   }
-  return { grid, dims: [W, H, D], voxels, material };
+  return { grid, confidenceGrid, dims: [W, H, D], voxels, material };
 }
 function calculateOccupancy(quant, config, silhouettes, depthState, material) {
   const useHull = silhouettes.prepared.length > 0 || config.reconstruction.mode === 'weighted'
@@ -2360,7 +2362,7 @@ function voxelize(pixels, opts, views) {
     return count;
   });
   const colored = _measureStage(stageMs, 'fuseColors', () => fuseVoxelColors(occupancy, quant, silhouettes, config));
-  const { grid, dims, voxels } = { ...occupancy, grid: colored.grid };
+  const { grid, dims, voxels, confidenceGrid } = { ...occupancy, grid: colored.grid };
   const mesh = _measureStage(stageMs, 'extractMesh', () => extractMesh(grid, dims, config, colored.faceColorAt, exposedFaceCount));
   const diagnostics = _measureStage(stageMs, 'diagnostics', () => buildDiagnostics(quant, grid, dims, silhouettes, depthState, viewInputs, occupancy));
   _refreshMaterialEvidenceBytes(material);
@@ -2427,12 +2429,14 @@ function voxelize(pixels, opts, views) {
       transformedViewPeakBytes: silhouettes.budget.peakBytes,
       bytesPerVoxel: voxels ? Math.round(memoryEstimateBytes / voxels) : 0,
       viewBytes: Object.assign(Object.create(null), Object.fromEntries(silhouettes.prepared.map(view => [view.id, _estimateMemoryBytes({ mask: view.mask, confidence: view.confidenceMap, distance: view.edgeDistance, colors: view.colors })]))),
+      avgConfidence: confidenceGrid && voxels > 0 ? Array.from(confidenceGrid).reduce((sum, v) => sum + v, 0) / voxels : 1,
     },
     diagnostics,
     debug: {
       silhouettes: silhouettes.previews,
       views: silhouettes.previews.byId,
     },
+    confidenceGrid: confidenceGrid || null,
   };
 }
 
