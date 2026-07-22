@@ -10,7 +10,7 @@
   },
   "keywords": ["voxel", "pixel-art", "3d", "sprite", "converter"],
   "author": "Nico Rueda",
-  "license": "MIT",
+  "license": "MPL-2.0",
   "engines": {
     "node": ">=18.0.0"
   }

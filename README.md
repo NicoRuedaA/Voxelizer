@@ -1,6 +1,6 @@
 # Voxelizer — Professional Voxel Generator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-orange.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Tests](https://img.shields.io/badge/tests-205%2F205%20passing-brightgreen)](tests/voxelizer.test.js)
 [![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
 
