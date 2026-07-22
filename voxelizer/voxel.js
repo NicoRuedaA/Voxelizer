@@ -1646,7 +1646,9 @@ function prepareMaterialEvidence(quant, silhouettes, config) {
     state.reason = 'no-cross-view-material-match';
     return state;
   }
-  const detailLimit = Math.max(4, Math.ceil(occupiedFront * 0.12));
+  // Only mark very small clusters as surface-only (noise/artifacts)
+  // Use 2% threshold instead of 12% to preserve thin features like staffs
+  const detailLimit = Math.max(4, Math.ceil(occupiedFront * 0.02));
   const surfaceOnly = new Uint8Array(front.clusterCount);
   for (let cluster = 0; cluster < front.clusterCount; cluster++) if (!supported[cluster]) {
     const detail = front.counts[cluster] <= detailLimit;
