@@ -1597,7 +1597,10 @@ function prepareMaterialEvidence(quant, silhouettes, config) {
           const vc = clustered.ids[sample];
           let match = false;
           if (view.role === 'back') {
-            const fc = front.clusterAt[sample];
+            // Map back view sample coordinates to front coordinates
+            const bx = sample % view.w, by = (sample / view.w) | 0;
+            const fx = view.w - 1 - bx;  // Mirror x for back view
+            const fc = front.clusterAt[fx + view.w * by];
             if (fc !== NO_MATERIAL && fc < front.clusterCount && entry.compatibility[fc * clustered.clusterCount + vc]) {
               entry.supportedFront[fc] = 1;
               supported[fc] = 1;

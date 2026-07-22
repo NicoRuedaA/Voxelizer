@@ -4133,3 +4133,39 @@ test('edgeTolerance > 0 recovers staff from misaligned back mirror', () => {
   const staffIndex = 60 + W * (midY + H * 1); // x=60, z=1
   assert.ok(result.grid[staffIndex] >= 0, `staff voxel should exist with edgeTolerance`);
 });
+
+test('staff survives with materials enabled and mirrored back view', () => {
+  // Regression: material evidence was incorrectly mapped for back views
+  // The bug: back view sample coordinates were used directly on front's cluster array
+  // without mapping back->front coordinates
+  const { Voxel } = loadRuntime();
+  const W = 64, H = 64;
+  const front = makePixels(W, H, (x, y) => {
+    const body = x >= 10 && x <= 55 && y >= 10 && y <= 55;
+    const staff = x === 60 && y >= 15 && y <= 50;
+    return (body || staff) ? [200, 100, 50, 255] : [0, 0, 0, 0];
+  });
+  // Back is horizontally mirrored with same colors
+  const back = makePixels(W, H, (x, y) => {
+    const mirrorX = (W - 1) - x;
+    const body = mirrorX >= 10 && mirrorX <= 55 && y >= 10 && y <= 55;
+    const staff = mirrorX === 60 && y >= 15 && y <= 50;
+    return (body || staff) ? [200, 100, 50, 255] : [0, 0, 0, 0];
+  });
+  const config = Voxel.createDefaultConfig();
+  config.material.enabled = true;  // Materials enabled
+  config.material.tolerance = 48;
+  config.material.strength = 0.6;
+  config.depth.layers = 2;
+  config.reconstruction.mode = 'strict';
+  const result = Voxel.voxelize(front, config, { views: [{ id: 'rear', role: 'back', pixels: back }] });
+  // Body: 46 cols × 46 rows = 2116 pixels × 2 layers = 4232 voxels
+  // Staff: 1 col × 36 rows = 36 pixels × 2 layers = 72 voxels
+  // Total: 4232 + 72 = 4304 voxels
+  const bodyOnly = 46 * 46 * 2; // 4232
+  assert.ok(result.voxels > bodyOnly, `staff should survive with materials enabled, got ${result.voxels} > ${bodyOnly}`);
+  // Verify staff column has voxels at middle y
+  const midY = H - 1 - 30; // y=30 in screen coords
+  const staffIndex = 60 + W * (midY + H * 1); // x=60, z=1
+  assert.ok(result.grid[staffIndex] >= 0, `staff voxel should exist at x=60, y=30, z=1 with materials enabled`);
+});
