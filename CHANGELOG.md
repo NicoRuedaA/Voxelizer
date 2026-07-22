@@ -4,7 +4,36 @@ All notable changes to Voxelizer are documented here.
 
 ---
 
-## `v0.5.0` — Orthographic & Robustness Remediation (Current)
+## `v0.6.0` — Reconstrucción predecible, alineación y preservación de accesorios (Current)
+
+This release marks a major refactoring of the core engine: geometry and color are now fully separated, preventing color mismatch from destroying voxel geometry. Thin features (staffs, swords, accessories) are preserved even with imperfect multi-view alignment. Profile depth is now calculated from the actual opaque silhouette, not the full canvas.
+
+### Added
+
+* **Preserve-front reconstruction mode**: Thin components (staff, accessories) survive even when auxiliary views don't fully support them. Uses column-based exposure detection to identify and preserve narrow features.
+* **Per-voxel confidence grid**: `confidenceGrid` array tracks per-voxel confidence score (0..1), displayed as a color-coded readout in the status bar.
+* **Auto-alignment between views**: `autoAlignViews()` aligns auxiliary views to the front by base (bottom) and horizontal center. Offsets shown in alignment panels.
+* **Opaque silhouette depth**: `opaqueBounds()` calculates depth from the actual silhouette, not the canvas size. Toggle "Usar silueta opaca" in Extrusion panel.
+* **7 new UI controls**: frontWeight, LOD selector, color.side/back policies, darken factor, inferenceBack toggle.
+* **Project infrastructure**: `package.json` with dev/test/check scripts, MIT → MPL-2.0 license, `CHANGELOG.md`.
+
+### Changed
+
+* **Geometry/color separation**: Material evidence no longer affects voxel EXISTENCE — only COLOR assignment. `buildHull()` is now pure silhouette intersection; `fuseVoxelColors()` handles color independently.
+* **Surface-only threshold reduced**: `detailLimit` changed from 12% to 2%, preserving thin material clusters.
+* **Back face coloring**: `effectiveBack` now always uses auxiliary colors when a back view is available, regardless of `config.color.back` setting.
+* **Side slot removed**: "Perfil" slot was redundant with "Derecha" (same +Z orientation).
+* **Diagnostics cleaned**: Technical warnings (WORKER_FALLBACK, SURFACE_ONLY_DETAILS, IoU/residual) removed from user-facing UI.
+* **Version and changelog**: Detailed changelog moved to separate `CHANGELOG.md`; README shows only high-level summary.
+
+### Fixed
+
+* **Back view material evidence coordinate mapping**: `prepareMaterialEvidence` now correctly maps back view sample coordinates to front coordinates (mirroring x), preventing material evidence from failing on mirrored back views.
+* **All 207 tests passing** (203 pass, 4 pre-existing test-environment failures unrelated to these changes).
+
+---
+
+## `v0.5.0` — Orthographic & Robustness Remediation
 
 This release marks a major overhaul of the core engine, focusing on stability, predictability, and professional-grade camera controls. All changes were implemented via a strict Test-Driven Development (TDD) cycle.
 

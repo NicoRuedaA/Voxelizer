@@ -1,6 +1,6 @@
 {
   "name": "voxelizer",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Professional 2D to 3D voxel converter for pixel art",
   "scripts": {
     "dev": "python3 -m http.server 8080",

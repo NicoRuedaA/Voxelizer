@@ -1,8 +1,8 @@
 # Voxelizer — Professional Voxel Generator
 
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-orange.svg)](https://opensource.org/licenses/MPL-2.0)
-[![Tests](https://img.shields.io/badge/tests-205%2F205%20passing-brightgreen)](tests/voxelizer.test.js)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
+[![Tests](https://img.shields.io/badge/tests-207%2F207%20passing-brightgreen)](tests/voxelizer.test.js)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](CHANGELOG.md)
 
 An advanced, robust, and usefull for converting 2D pixel art into high-quality 3D voxel models. Designed for and by game developers.
 
@@ -61,4 +61,4 @@ This project is developed using **Spec-Driven Development (SDD)** to ensure that
 
 Voxelizer is actively maintained with strict TDD. For a detailed breakdown of all features, technical architecture changes, and patch notes, see [CHANGELOG.md](CHANGELOG.md) or check the [GitHub Releases](https://github.com/NicoRuedaA/Voxelizer/releases) page.
 
-**Current Release: v0.5.0** — Major overhaul of the core engine focusing on stability, predictability, and professional-grade camera controls. Includes full orthographic camera suite, pre-flight VOX export memory budgeting, and advanced multi-view inference.
+**Current Release: v0.6.0** — Reconstruction multivista predecible, alineación automática y preservación de accesorios finos. Geometría y color separados. 207 tests.
