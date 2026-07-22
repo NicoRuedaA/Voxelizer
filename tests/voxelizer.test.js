@@ -2198,7 +2198,7 @@ test('back mas ancho que front no expande la huella frontal', () => {
   assert.deepEqual(Array.from(result.dims), [3, 3, 2]);
 });
 
-test('politica back front ignora la vista back en color por defecto', () => {
+test('politica back usa colores auxiliares cuando hay vista trasera', () => {
   const { Voxel } = loadRuntime();
   const front = makePixels(1, 1, () => [255, 0, 0, 255]);
   const back = makePixels(1, 1, () => [0, 0, 255, 255]);
@@ -2209,9 +2209,10 @@ test('politica back front ignora la vista back en color por defecto', () => {
   const backFace = result.greedyFacesList.find(face => face.normal[2] === -1);
   assert.ok(backFace);
   const backColor = result.palette[backFace.color];
-  assert.equal(backColor[0], 255);
+  // When back view is available, use its colors (blue) instead of front (red)
+  assert.equal(backColor[0], 0);
   assert.equal(backColor[1], 0);
-  assert.equal(backColor[2], 0);
+  assert.equal(backColor[2], 255);
 });
 
 // ---------- Unit 3: left/right/top silhouette roles ----------

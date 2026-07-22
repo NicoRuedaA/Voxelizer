@@ -1826,7 +1826,7 @@ function fuseVoxelColors(occupancy, quant, silhouettes, config) {
   const backViews = silhouettes.prepared.filter(view => view.role === 'back');
   const usableAuxiliary = sideViews.concat(topViews).concat(backViews).some(view => view.confidence > 0 && !!view.bounds);
   const effectiveSide = config.color.mode === 'auxiliary' && sideViews.concat(topViews).some(view => view.confidence > 0 && !!view.bounds) ? 'auxiliary' : config.color.side;
-  const effectiveBack = config.color.back === 'auxiliary' && backViews.some(view => view.confidence > 0 && !!view.bounds) ? 'auxiliary' : config.color.back;
+  const effectiveBack = backViews.some(view => view.confidence > 0 && !!view.bounds) ? 'auxiliary' : config.color.back;
   const [W, H, D] = dims;
   const frontmostZ = new Int16Array(W * H).fill(-1);
   for (let z = 0; z < D; z++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
