@@ -2481,6 +2481,8 @@ function annotateAO(faces, grid, dims, strength) {
 const voxelRoot = (typeof window !== 'undefined') ? window : globalThis;
 voxelRoot.Voxel = {
   RECONSTRUCTION_MODES,
+  MAX_DEPTH_LAYERS,
+  canvasToPixels,
   validatePixels,
   preprocessPixels,
   createDefaultConfig,
